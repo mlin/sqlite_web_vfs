@@ -41,10 +41,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(web_vfs SHARED src/web_vfs.cc src/web_vfs.h src/SQLiteVFS.h src/ThreadPool.h src/HTTP.h)
 SET_TARGET_PROPERTIES(web_vfs PROPERTIES PREFIX "")
-target_link_libraries(web_vfs PRIVATE sqlite3 curl)
+target_link_libraries(web_vfs PRIVATE curl)
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     include(CTest)
     enable_testing()
-    add_test(NAME pytest COMMAND python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test/test.py)
+    add_test(NAME pytest COMMAND python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test)
 endif()

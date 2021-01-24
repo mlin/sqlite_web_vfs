@@ -1,0 +1,59 @@
+name: CI
+on: [push, pull_request]
+
+env:
+  PIP_DEPS: pytest pytest-xdist
+
+jobs:
+
+  lint:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: deps
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get install -y clang-format cppcheck python3-pip
+        sudo pip3 install --system pre-commit $PIP_DEPS black flake8 pylint
+    - name: pre-commit
+      run: pre-commit run --all-files
+
+  linux:
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        BUILD_TYPE: [Debug, Release]
+    steps:
+    - uses: actions/checkout@v2
+    - name: docker build
+      run: docker build -t sqlite_web_vfs_tests --build-arg build_type=${{ matrix.BUILD_TYPE }} .
+    - name: run tests
+      run: docker run sqlite_web_vfs_tests
+
+  macOS:
+    runs-on: macOS-10.15
+    strategy:
+      matrix:
+        BUILD_TYPE: [Debug, Release]
+    steps:
+    - uses: actions/checkout@v2
+    - name: dependencies
+      run: |
+        brew install python sqlite
+        /usr/local/bin/pip3 install $PIP_DEPS
+    - name: build
+      run: |
+        CXXFLAGS="-I$(brew --prefix)/include -I$(brew --prefix)/opt/sqlite/include" \
+        LDFLAGS="-L$(brew --prefix)/lib -L$(brew --prefix)/opt/sqlite/lib" \
+          cmake -DCMAKE_BUILD_TYPE=${{ matrix.BUILD_TYPE }} \
+                -DCMAKE_PREFIX_PATH=$(brew --prefix)/opt/sqlite \
+                -B build .
+        cmake --build build -j 4
+    - name: ctest
+      run: |
+        export PREFIX=$(brew --prefix)
+        export PATH=$(ls -p1 ${PREFIX}/opt/python@*)/bin:$PATH
+        cd build
+        ctest -V
