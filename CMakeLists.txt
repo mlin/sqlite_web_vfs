@@ -23,14 +23,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
 
-FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY  https://github.com/gabime/spdlog.git
-    GIT_TAG         v1.8.2
-)
-FetchContent_MakeAvailable(spdlog)
-include_directories(${spdlog_SOURCE_DIR}/include)
-
 project(sqlite_web_vfs VERSION 1.0
         DESCRIPTION "SQLite3 extension for read-only HTTP(S) database access"
         LANGUAGES C CXX)

@@ -4,7 +4,12 @@
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
 
-#include <string>
+using std::endl;
+#ifndef NDEBUG
+#define DBG std::cerr << __FILE__ << ":" << __LINE__ << ": "
+#else
+#define DBG false && std::cerr
+#endif
 
 class WebFile : public SQLiteVFS::File {
     std::string uri_;
@@ -122,7 +127,7 @@ class WebVFS : public SQLiteVFS::Wrapper {
             // parse content-length
             auto size_it = reshdrs.find("content-length");
             if (size_it == reshdrs.end()) {
-                last_error_ = "HTTP HEAD response didn't include content-length header";
+                last_error_ = "HTTP HEAD response lacking content-length header";
                 return SQLITE_IOERR_READ;
             }
             const char *size_str = size_it->second.c_str();
@@ -130,7 +135,7 @@ class WebVFS : public SQLiteVFS::Wrapper {
             errno = 0;
             unsigned long long file_size = strtoull(size_str, &endptr, 10);
             if (errno || endptr != size_str + strlen(size_str)) {
-                last_error_ = "HTTP HEAD response had unreadable content-length header";
+                last_error_ = "HTTP HEAD response with unreadable content-length header";
                 return SQLITE_IOERR_READ;
             }
 
