@@ -95,58 +95,54 @@ class WebVFS : public SQLiteVFS::Wrapper {
         }
 
         // get desired URI
-        auto rc = HTTP::ensure_init();
-        if (rc != CURLE_OK) {
-            last_error_ += "libcurl initialization failed: ";
-            last_error_ += curl_easy_strerror(rc);
-            return SQLITE_ERROR;
-        }
-        std::string uri;
-        std::unique_ptr<HTTP::CURLpool> curlpool;
         try {
+            std::string uri;
+            std::unique_ptr<HTTP::CURLpool> curlpool;
             curlpool.reset(new HTTP::CURLpool(4));
             auto conn = curlpool->checkout();
-            uri = conn->unescape(encoded_uri);
+            if (!conn->unescape(encoded_uri, uri)) {
+                last_error_ = "Failed URI-decoding web_uri";
+                return SQLITE_CANTOPEN;
+            }
             curlpool->checkin(conn);
-        } catch (std::exception &exn) {
-            last_error_ = exn.what();
-            return SQLITE_ERROR;
-        }
 
-        // HEAD request to determine the database file's existence & size
-        HTTP::headers reqhdrs, reshdrs;
-        long status = -1;
-        rc = HTTP::Head(uri, reqhdrs, status, reshdrs, curlpool.get());
-        if (rc != CURLE_OK) {
-            last_error_ += "HEAD failed: ";
-            last_error_ += curl_easy_strerror(rc);
-            return SQLITE_IOERR_READ;
-        }
-        if (status < 200 || status >= 300) {
-            return SQLITE_CANTOPEN;
-        }
+            // HEAD request to determine the database file's existence & size
+            HTTP::headers reqhdrs, reshdrs;
+            long status = -1;
+            CURLcode rc = HTTP::Head(uri, reqhdrs, status, reshdrs, curlpool.get());
+            if (rc != CURLE_OK) {
+                last_error_ += "HEAD failed: ";
+                last_error_ += curl_easy_strerror(rc);
+                return SQLITE_IOERR_READ;
+            }
+            if (status < 200 || status >= 300) {
+                return SQLITE_CANTOPEN;
+            }
 
-        // parse content-length
-        auto size_it = reshdrs.find("content-length");
-        if (size_it == reshdrs.end()) {
-            last_error_ = "HTTP HEAD response didn't include content-length header";
-            return SQLITE_IOERR_READ;
-        }
-        const char *size_str = size_it->second.c_str();
-        char *endptr = nullptr;
-        errno = 0;
-        unsigned long long file_size = strtoull(size_str, &endptr, 10);
-        if (errno || endptr != size_str + strlen(size_str)) {
-            last_error_ = "HTTP HEAD response had unreadable content-length header";
-            return SQLITE_IOERR_READ;
-        }
+            // parse content-length
+            auto size_it = reshdrs.find("content-length");
+            if (size_it == reshdrs.end()) {
+                last_error_ = "HTTP HEAD response didn't include content-length header";
+                return SQLITE_IOERR_READ;
+            }
+            const char *size_str = size_it->second.c_str();
+            char *endptr = nullptr;
+            errno = 0;
+            unsigned long long file_size = strtoull(size_str, &endptr, 10);
+            if (errno || endptr != size_str + strlen(size_str)) {
+                last_error_ = "HTTP HEAD response had unreadable content-length header";
+                return SQLITE_IOERR_READ;
+            }
 
-        // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
-        // will make it self-delete.
-        auto webfile = new WebFile(uri, file_size, std::move(curlpool));
-        webfile->InitHandle(pFile);
-        *pOutFlags = flags;
-        return SQLITE_OK;
+            // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
+            // will make it self-delete.
+            auto webfile = new WebFile(uri, file_size, std::move(curlpool));
+            webfile->InitHandle(pFile);
+            *pOutFlags = flags;
+            return SQLITE_OK;
+        } catch (std::bad_alloc &) {
+            return SQLITE_IOERR_NOMEM;
+        }
     }
 
     int GetLastError(int nByte, char *zErrMsg) override {

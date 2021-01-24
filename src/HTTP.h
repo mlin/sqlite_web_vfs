@@ -1,4 +1,6 @@
-/** Wrappers for libcurl HTTP operations */
+/** Wrappers for libcurl HTTP operations.
+ *  Program must curl_global_init(CURL_GLOBAL_ALL) before using this
+ */
 #pragma once
 
 #include "spdlog/spdlog.h"
@@ -18,18 +20,6 @@
 
 namespace HTTP {
 
-CURLcode ensure_init() {
-    static bool need_init = true;
-    if (need_init) {
-        CURLcode rc = curl_global_init(CURL_GLOBAL_ALL);
-        if (rc != CURLE_OK) {
-            return rc;
-        }
-        need_init = false;
-    }
-    return CURLE_OK;
-}
-
 // Helper class to scope a CURL handle
 class CURLconn {
     CURL *h_;
@@ -47,26 +37,26 @@ class CURLconn {
     }
     operator CURL *() const { return h_; }
 
-    std::string escape(const std::string &in) {
-        char *out = curl_easy_escape(h_, in.c_str(), in.size());
-        if (!out) {
-            throw std::runtime_error("curl_easy_escape");
+    bool escape(const std::string &in, std::string &out) {
+        char *pOut = curl_easy_escape(h_, in.c_str(), in.size());
+        if (!pOut) {
+            return false;
         }
-        std::string ans(out);
-        curl_free(out);
-        return ans;
+        out = pOut;
+        curl_free(pOut);
+        return true;
     }
 
-    std::string unescape(const std::string &in) {
+    bool unescape(const std::string &in, std::string &out) {
         int outlength = -1;
-        char *out = curl_easy_unescape(h_, in.c_str(), in.size(), &outlength);
-        if (!out || outlength < 0) {
-            curl_free(out);
-            throw std::runtime_error("curl_easy_unescape");
+        char *pOut = curl_easy_unescape(h_, in.c_str(), in.size(), &outlength);
+        if (!pOut || outlength < 0) {
+            curl_free(pOut);
+            return false;
         }
-        std::string ans(out, (size_t)outlength);
-        curl_free(out);
-        return ans;
+        out.assign(pOut, (size_t)outlength);
+        curl_free(pOut);
+        return true;
     }
 };
 
@@ -135,7 +125,6 @@ size_t writefunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size;
 }
 
-// trim from start
 std::string &ltrim(std::string &s) {
     s.erase(s.begin(),
             std::find_if(s.begin(), s.end(), std::not1(std::ptr_fun<int, int>(std::isspace))));
@@ -190,7 +179,6 @@ CURLcode request(Method method, const std::string url, const headers &request_he
                  long &response_code, headers &response_headers, std::ostream &response_body,
                  CURLpool *pool) {
     CURLcode c;
-    CURLcall(ensure_init());
 
     std::unique_ptr<CURLconn> conn;
 

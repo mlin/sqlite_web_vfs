@@ -16,9 +16,13 @@ SQLITE_EXTENSION_INIT1
 extern "C" int sqlite3_webvfs_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     SQLITE_EXTENSION_INIT2(pApi);
     spdlog::set_level(spdlog::level::debug);
+
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+        spdlog::error("Failed to initialize libcurl");
+        return SQLITE_ERROR;
+    }
+
     int rc = SQLITE_OK;
     rc = (new WebVFS())->Register("web");
-    if (rc == SQLITE_OK)
-        rc = SQLITE_OK_LOAD_PERMANENTLY;
-    return rc;
+    return rc != SQLITE_OK ? rc : SQLITE_OK_LOAD_PERMANENTLY;
 }
