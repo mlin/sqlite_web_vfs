@@ -16,6 +16,7 @@
 #include <queue>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 namespace HTTP {
 
@@ -31,8 +32,9 @@ class CURLconn {
         }
     }
     virtual ~CURLconn() {
-        if (h_)
+        if (h_) {
             curl_easy_cleanup(h_);
+        }
     }
     operator CURL *() const { return h_; }
 
@@ -167,6 +169,27 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size;
 }
 
+// Read content-length response header
+// return: >= 0 the value
+//         -1 header absent
+//         -2 header present, but unreadable
+long long ReadContentLengthHeader(const headers &response_headers) {
+    auto size_it = response_headers.find("content-length");
+    if (size_it == response_headers.end()) {
+        return 1;
+    }
+    std::string size = size_it->second;
+    size = trim(size);
+    const char *size_str = size.c_str();
+    char *endptr = nullptr;
+    errno = 0;
+    unsigned long long file_size = strtoull(size_str, &endptr, 10);
+    if (errno || endptr != size_str + size.size() || file_size > LLONG_MAX) {
+        return -2;
+    }
+    return (long long)file_size;
+}
+
 enum class Method { GET, HEAD };
 // helper macros
 #define CURLcall(call)                                                                             \
@@ -174,9 +197,9 @@ enum class Method { GET, HEAD };
     return c
 #define CURLsetopt(x, y, z) CURLcall(curl_easy_setopt(x, y, z))
 
-CURLcode request(Method method, const std::string url, const headers &request_headers,
+CURLcode Request(Method method, const std::string &url, const headers &request_headers,
                  long &response_code, headers &response_headers, std::ostream &response_body,
-                 CURLpool *pool) {
+                 CURLpool *pool = nullptr) {
     CURLcode c;
 
     std::unique_ptr<CURLconn> conn;
@@ -222,18 +245,106 @@ CURLcode request(Method method, const std::string url, const headers &request_he
     return CURLE_OK;
 }
 
-CURLcode Get(const std::string url, const headers &request_headers, long &response_code,
+CURLcode Get(const std::string &url, const headers &request_headers, long &response_code,
              headers &response_headers, std::ostream &response_body, CURLpool *pool = nullptr) {
-    return request(Method::GET, url, request_headers, response_code, response_headers,
+    return Request(Method::GET, url, request_headers, response_code, response_headers,
                    response_body, pool);
 }
 
-CURLcode Head(const std::string url, const headers &request_headers, long &response_code,
+CURLcode Head(const std::string &url, const headers &request_headers, long &response_code,
               headers &response_headers, CURLpool *pool = nullptr) {
     std::ostringstream dummy;
     CURLcode ans =
-        request(Method::HEAD, url, request_headers, response_code, response_headers, dummy, pool);
+        Request(Method::HEAD, url, request_headers, response_code, response_headers, dummy, pool);
     return ans;
+}
+
+class Stopwatch {
+    unsigned long long t0_;
+
+  public:
+    Stopwatch() {
+        timeval t0;
+        gettimeofday(&t0, nullptr);
+        t0_ = t0.tv_sec * 1000000ULL + t0.tv_usec;
+    }
+
+    unsigned long long micros() {
+        timeval tv;
+        gettimeofday(&tv, nullptr);
+        return tv.tv_sec * 1000ULL + tv.tv_usec - t0_;
+    }
+};
+
+// Parameters controlling request retry logic. Retryable errors:
+// - Connection errors
+// - 5xx response codes
+// - Mismatched content-length header & actual body size
+struct RetryOptions {
+    // Maximum number of attempts (including the first one)
+    unsigned int max_tries = 5;
+    // Microseconds to wait before the first retry attempt
+    useconds_t initial_delay = 100000;
+    // On each subsequent retry, the delay is multiplied by this factor
+    unsigned int backoff_factor = 4;
+
+    // Retry if response body has fewer bytes
+    size_t min_response_body = 0;
+
+    HTTP::CURLpool *connpool = nullptr;
+};
+
+CURLcode RetryRequest(Method method, const std::string &url, const headers &request_headers,
+                      long &response_code, headers &response_headers, std::string &response_body,
+                      const RetryOptions &options) {
+    useconds_t delay = options.initial_delay;
+    std::ostringstream response_body_stream;
+    CURLcode rc;
+
+    for (unsigned int i = 0; i < options.max_tries; ++i) {
+        if (i) {
+            usleep(delay);
+            delay *= options.backoff_factor;
+        }
+
+        // LogHeaders(request_headers);
+        Stopwatch t;
+
+        response_headers.clear();
+        response_body_stream.clear();
+        rc = HTTP::Request(method, url, request_headers, response_code, response_headers,
+                           response_body_stream, options.connpool);
+        if (rc == CURLE_OK) {
+            if (response_code >= 200 && response_code < 300) {
+                std::string body = response_body_stream.str();
+                long long content_length = ReadContentLengthHeader(response_headers);
+                if (body.size() >= options.min_response_body &&
+                    (method == Method::HEAD || content_length < 0 ||
+                     body.size() == content_length)) {
+                    response_body = std::move(body);
+                    return CURLE_OK;
+                }
+            } else if (response_code < 500 || response_code >= 600) {
+                return CURLE_OK;
+            }
+        }
+    }
+
+    return rc;
+}
+
+CURLcode RetryGet(const std::string &url, const headers &request_headers, long &response_code,
+                  headers &response_headers, std::string &response_body,
+                  const RetryOptions &options) {
+    return RetryRequest(Method::GET, url, request_headers, response_code, response_headers,
+                        response_body, options);
+}
+
+CURLcode RetryHead(const std::string &url, const headers &request_headers, long &response_code,
+                   headers &response_headers, const RetryOptions &options) {
+    std::string dummy;
+    return RetryRequest(Method::HEAD, url, request_headers, response_code, response_headers, dummy,
+                        options);
 }
 
 } // namespace HTTP

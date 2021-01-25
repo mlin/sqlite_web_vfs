@@ -13,7 +13,7 @@ using std::endl;
 
 class WebFile : public SQLiteVFS::File {
     std::string uri_;
-    unsigned long long file_size_;
+    sqlite_int64 file_size_;
     std::unique_ptr<HTTP::CURLpool> curlpool_;
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
@@ -27,13 +27,16 @@ class WebFile : public SQLiteVFS::File {
             reqhdrs["range"] = fmt_range.str();
 
             long status = -1;
-            std::ostringstream bodystream; // TODO: write directly into zBuf
-            auto rc = HTTP::Get(uri_, reqhdrs, status, reshdrs, bodystream, curlpool_.get());
+            std::string body;
+            HTTP::RetryOptions options;
+            options.connpool = curlpool_.get();
+            auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, body, options);
             if (rc != CURLE_OK || status < 200 || status >= 300) {
+                DBG << curl_easy_strerror(rc) << " (" << status << ")" << endl;
                 return SQLITE_IOERR_READ;
             }
-            auto body = bodystream.str();
             if (body.size() != iAmt) {
+                DBG << body.size() << "!=" << iAmt << endl;
                 return SQLITE_IOERR_SHORT_READ;
             }
 
@@ -73,7 +76,7 @@ class WebFile : public SQLiteVFS::File {
     int Unfetch(sqlite3_int64 iOfst, void *p) override { return SQLITE_MISUSE; }
 
   public:
-    WebFile(const std::string &uri, unsigned long long file_size,
+    WebFile(const std::string &uri, sqlite_int64 file_size,
             std::unique_ptr<HTTP::CURLpool> &&curlpool)
         : uri_(uri), file_size_(file_size), curlpool_(std::move(curlpool)) {
         methods_.iVersion = 1;
@@ -114,10 +117,13 @@ class WebVFS : public SQLiteVFS::Wrapper {
             // HEAD request to determine the database file's existence & size
             HTTP::headers reqhdrs, reshdrs;
             long status = -1;
-            CURLcode rc = HTTP::Head(uri, reqhdrs, status, reshdrs, curlpool.get());
+            HTTP::RetryOptions options;
+            options.connpool = curlpool.get();
+            CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
             if (rc != CURLE_OK) {
-                last_error_ += "HEAD failed: ";
+                last_error_ = "HEAD failed: ";
                 last_error_ += curl_easy_strerror(rc);
+                DBG << last_error_ << endl;
                 return SQLITE_IOERR_READ;
             }
             if (status < 200 || status >= 300) {
@@ -125,17 +131,10 @@ class WebVFS : public SQLiteVFS::Wrapper {
             }
 
             // parse content-length
-            auto size_it = reshdrs.find("content-length");
-            if (size_it == reshdrs.end()) {
-                last_error_ = "HTTP HEAD response lacking content-length header";
-                return SQLITE_IOERR_READ;
-            }
-            const char *size_str = size_it->second.c_str();
-            char *endptr = nullptr;
-            errno = 0;
-            unsigned long long file_size = strtoull(size_str, &endptr, 10);
-            if (errno || endptr != size_str + strlen(size_str)) {
-                last_error_ = "HTTP HEAD response with unreadable content-length header";
+            long long file_size = HTTP::ReadContentLengthHeader(reshdrs);
+            if (file_size < 0) {
+                last_error_ = "HTTP HEAD response lacking valid content-length header";
+                DBG << last_error_ << endl;
                 return SQLITE_IOERR_READ;
             }
 
