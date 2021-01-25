@@ -33,8 +33,6 @@ struct Extent {
     Size size;
     size_t rank;
 
-    Extent(Size size_, size_t rank_) : size(size_), rank(rank_) {}
-
     static size_t Bytes(Size sz) {
         switch (sz) {
         case Size::SM:
@@ -54,7 +52,10 @@ struct Extent {
         throw std::runtime_error("unaligned Read");
     }
 
-    bool operator<(const Extent &rhs) const { return size < rhs.size && rank < rhs.rank; }
+    Extent(Size size_, size_t rank_) : size(size_), rank(rank_) {}
+    bool operator<(const Extent &rhs) const {
+        return size < rhs.size || (size == rhs.size && rank < rhs.rank);
+    }
 
     Extent Promote() const {
         if (size == Size::SM) {
@@ -73,6 +74,14 @@ struct Extent {
     bool Contains(uint64_t offset, size_t length) const {
         return offset >= Offset() && offset + length <= Offset() + Bytes();
     }
+
+    bool Contains(const Extent &rhs) const { return Contains(rhs.Offset(), rhs.Bytes()); }
+
+    std::string str() const {
+        std::ostringstream fmt_range;
+        fmt_range << "bytes=" << Offset() << "-" << (Offset() + Bytes() - 1);
+        return fmt_range.str();
+    }
 };
 
 class File : public SQLiteVFS::File {
@@ -90,10 +99,7 @@ class File : public SQLiteVFS::File {
         Timer t;
         try {
             HTTP::headers reqhdrs, reshdrs;
-            std::ostringstream fmt_range;
-            fmt_range << "bytes=" << extent.Offset() << "-"
-                      << (extent.Offset() + extent.Bytes() - 1);
-            reqhdrs["range"] = fmt_range.str();
+            reqhdrs["range"] = extent.str();
 
             long status = -1;
             bool retried = false;
@@ -160,17 +166,36 @@ class File : public SQLiteVFS::File {
 
         auto last_used = usage_.rbegin();
         if (last_used != usage_.rend() && last_used->second.Contains(iOfst, iAmt)) {
-            // the most-recently used extent has the page we need
+            // most-recently used extent still has the page we need
             extent = last_used->second;
             data = &(resident_.find(extent)->second.first);
         } else {
             // find a resident extent containing desired page
             extent = Extent::Containing(iOfst, iAmt);
             auto line = resident_.find(extent);
+            for (int i = 0; i < 2 && line == resident_.end(); ++i) {
+                line = resident_.find((extent = extent.Promote()));
+            }
             if (line != resident_.end()) {
+                extent = line->first;
                 usage_.erase(line->second.second); // old seqno
             } else {
                 // need to fetch extent
+                extent = Extent::Containing(iOfst, iAmt);
+                // if we already have an adjacent extent (at any size), promote to next size
+                Extent promoted = extent;
+                for (int i = 0; i < 2; ++i) {
+                    if (promoted.rank > 0 &&
+                            resident_.find(Extent(promoted.size, promoted.rank - 1)) !=
+                                resident_.end() ||
+                        resident_.find(Extent(promoted.size, promoted.rank + 1)) !=
+                            resident_.end()) {
+                        extent = promoted.Promote();
+                    }
+                    promoted = promoted.Promote();
+                }
+                // TODO: when to initiate background prefetch?
+
                 std::string buf;
                 int rc = FetchExtent(extent, buf);
                 if (rc != SQLITE_OK) {
@@ -178,10 +203,22 @@ class File : public SQLiteVFS::File {
                 }
                 resident_[extent] = std::move(std::make_pair(std::move(buf), 0));
                 line = resident_.find(extent);
+
+                for (auto p = resident_.begin();
+                     p != resident_.end() && p->first.size < extent.size; ++p) {
+                    // evict any smaller extents contained by the new one
+                    if (extent.Contains(p->first)) {
+                        usage_.erase(p->second.second);
+                        resident_.erase(p);
+                    }
+                }
             }
+
+            // bump extent seqno
             usage_.insert(std::make_pair(++extent_seqno_, extent));
             line->second.second = extent_seqno_;
             data = &(line->second.first);
+
             while (resident_.size() > 64) {
                 // evict LRU extent
                 auto lru = usage_.begin();
@@ -189,6 +226,7 @@ class File : public SQLiteVFS::File {
                 usage_.erase(lru->first);
             }
         }
+
         memcpy(zBuf, data->c_str() + (iOfst - extent.Offset()), iAmt);
         return SQLITE_OK;
     }

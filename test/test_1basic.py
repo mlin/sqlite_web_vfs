@@ -18,3 +18,17 @@ def test_master():
         f"file:/__web__?vfs=web&mode=ro&web_uri={urllib.parse.quote(CHINOOK_URI)}", uri=True
     )
     print(list(con.execute("select * from sqlite_master")))
+
+    print(
+        list(
+            con.execute(
+                """
+                select e.*, count(i.invoiceid) as 'Total Number of Sales'
+                from employee as e
+                    join customer as c on e.employeeid = c.supportrepid
+                    join invoice as i on i.customerid = c.customerid
+                group by e.employeeid
+                """
+            )
+        )
+    )
