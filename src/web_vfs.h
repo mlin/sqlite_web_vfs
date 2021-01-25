@@ -4,22 +4,39 @@
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
 
-using std::endl;
-#ifndef NDEBUG
-#define DBG std::cerr << __FILE__ << ":" << __LINE__ << ": "
-#else
-#define DBG false && std::cerr
-#endif
+namespace WebVFS {
 
-class WebFile : public SQLiteVFS::File {
-    std::string uri_;
+using std::cerr;
+using std::endl;
+
+class Timer {
+    unsigned long long t0_;
+
+  public:
+    Timer() {
+        timeval t0;
+        gettimeofday(&t0, nullptr);
+        t0_ = t0.tv_sec * 1000000ULL + t0.tv_usec;
+    }
+
+    unsigned long long micros() {
+        timeval tv;
+        gettimeofday(&tv, nullptr);
+        return tv.tv_sec * 1000000ULL + tv.tv_usec - t0_;
+    }
+};
+
+class File : public SQLiteVFS::File {
+    std::string uri_, filename_;
     sqlite_int64 file_size_;
     std::unique_ptr<HTTP::CURLpool> curlpool_;
+    unsigned long log_level_ = 1;
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
         if (iAmt == 0) {
             return SQLITE_OK;
         }
+        Timer t;
         try {
             HTTP::headers reqhdrs, reshdrs;
             std::ostringstream fmt_range;
@@ -27,17 +44,45 @@ class WebFile : public SQLiteVFS::File {
             reqhdrs["range"] = fmt_range.str();
 
             long status = -1;
+            bool retried = false;
             std::string body;
             HTTP::RetryOptions options;
+            options.min_response_body = iAmt;
             options.connpool = curlpool_.get();
+            options.on_retry = [&retried](HTTP::Method method, const std::string &url,
+                                          const HTTP::headers &request_headers, CURLcode rc,
+                                          long response_code, const HTTP::headers &response_headers,
+                                          const std::string &response_body,
+                                          unsigned int attempt) { retried = true; };
             auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, body, options);
-            if (rc != CURLE_OK || status < 200 || status >= 300) {
-                DBG << curl_easy_strerror(rc) << " (" << status << ")" << endl;
+            if (rc != CURLE_OK) {
+                if (log_level_) {
+                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << ' '
+                         << curl_easy_strerror(rc) << endl;
+                }
+                return SQLITE_IOERR_READ;
+            }
+            if (status < 200 || status >= 300) {
+                if (log_level_) {
+                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
+                         << " error status = " << status << endl;
+                }
                 return SQLITE_IOERR_READ;
             }
             if (body.size() != iAmt) {
-                DBG << body.size() << "!=" << iAmt << endl;
+                if (log_level_) {
+                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
+                         << " incorrect response body length = " << body.size()
+                         << ", expected = " << iAmt << endl;
+                }
                 return SQLITE_IOERR_SHORT_READ;
+            }
+            if (log_level_ > 1) {
+                cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
+                     << (t.micros() / 1000) << "ms)" << endl;
+            } else if (log_level_ && retried) {
+                cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK after retry ("
+                     << (t.micros() / 1000) << "ms)" << endl;
             }
 
             memcpy(zBuf, body.c_str(), iAmt);
@@ -76,15 +121,16 @@ class WebFile : public SQLiteVFS::File {
     int Unfetch(sqlite3_int64 iOfst, void *p) override { return SQLITE_MISUSE; }
 
   public:
-    WebFile(const std::string &uri, sqlite_int64 file_size,
-            std::unique_ptr<HTTP::CURLpool> &&curlpool)
-        : uri_(uri), file_size_(file_size), curlpool_(std::move(curlpool)) {
+    File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
+         std::unique_ptr<HTTP::CURLpool> &&curlpool, unsigned long log_level = 1)
+        : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
+          log_level_(log_level) {
         methods_.iVersion = 1;
     }
-    virtual ~WebFile() = default;
+    virtual ~File() = default;
 };
 
-class WebVFS : public SQLiteVFS::Wrapper {
+class VFS : public SQLiteVFS::Wrapper {
   protected:
     std::string last_error_;
 
@@ -101,6 +147,14 @@ class WebVFS : public SQLiteVFS::Wrapper {
             last_error_ = "web access is read-only";
             return SQLITE_CANTOPEN;
         }
+        unsigned long log_level = 1;
+        const char *env_log = getenv("SQLITE_WEB_LOG");
+        if (env_log && *env_log) {
+            log_level = strtoul(env_log, nullptr, 10);
+            if (log_level == ULONG_MAX) {
+                log_level = 1;
+            }
+        }
 
         // get desired URI
         try {
@@ -113,6 +167,8 @@ class WebVFS : public SQLiteVFS::Wrapper {
                 return SQLITE_CANTOPEN;
             }
             curlpool->checkin(conn);
+            std::string filename = JustFileName(uri);
+            Timer t;
 
             // HEAD request to determine the database file's existence & size
             HTTP::headers reqhdrs, reshdrs;
@@ -121,26 +177,40 @@ class WebVFS : public SQLiteVFS::Wrapper {
             options.connpool = curlpool.get();
             CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
             if (rc != CURLE_OK) {
-                last_error_ = "HEAD failed: ";
+                last_error_ = "HTTP HEAD " + filename + ": ";
                 last_error_ += curl_easy_strerror(rc);
-                DBG << last_error_ << endl;
+                if (log_level) {
+                    cerr << last_error_ << endl;
+                }
                 return SQLITE_IOERR_READ;
             }
             if (status < 200 || status >= 300) {
+                last_error_ =
+                    "HTTP HEAD " + filename + ": error status = " + std::to_string(status);
+                if (log_level) {
+                    cerr << last_error_ << endl;
+                }
                 return SQLITE_CANTOPEN;
             }
 
             // parse content-length
             long long file_size = HTTP::ReadContentLengthHeader(reshdrs);
             if (file_size < 0) {
-                last_error_ = "HTTP HEAD response lacking valid content-length header";
-                DBG << last_error_ << endl;
+                last_error_ =
+                    "HTTP HEAD " + filename + ":response lacking valid content-length header";
+                if (log_level) {
+                    cerr << last_error_ << endl;
+                }
                 return SQLITE_IOERR_READ;
+            }
+            if (log_level > 1) {
+                cerr << "HTTP HEAD " << filename << " content-length: " << file_size << " ("
+                     << (t.micros() / 1000) << "ms)" << endl;
             }
 
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
-            auto webfile = new WebFile(uri, file_size, std::move(curlpool));
+            auto webfile = new File(uri, filename, file_size, std::move(curlpool), log_level);
             webfile->InitHandle(pFile);
             *pOutFlags = flags;
             return SQLITE_OK;
@@ -157,4 +227,19 @@ class WebVFS : public SQLiteVFS::Wrapper {
         }
         return SQLiteVFS::Wrapper::GetLastError(nByte, zErrMsg);
     }
+
+    std::string JustFileName(const std::string &uri) {
+        std::string ans = uri;
+        auto p = ans.find('?');
+        if (p != std::string::npos) {
+            ans = ans.substr(0, p);
+        }
+        p = ans.rfind('/');
+        if (p != std::string::npos) {
+            ans = ans.substr(p + 1);
+        }
+        return ans;
+    }
 };
+
+} // namespace WebVFS

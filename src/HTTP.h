@@ -4,7 +4,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cctype>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -61,11 +60,10 @@ class CURLconn {
     }
 };
 
-// A very simple pool of CURL handles, which can persist server connections in
-// between requests. Any number of handles can be checked out; at most 'size'
-// handles will be kept once checked back in. (Since we use blocking
-// operations, 'size' should probably be set to the number of threads that
-// could make concurrent requests)
+// A pool of CURL handles, which can persist server connections in between requests. Any number of
+// handles can be checked out; at most `size` handles will be kept one checked back in. (Since we
+// use blocking operations, `size` should usually be set to the number of threads that can make
+// concurrent requests.)
 class CURLpool {
     unsigned int size_;
     std::queue<std::unique_ptr<CURLconn>> pool_;
@@ -259,23 +257,6 @@ CURLcode Head(const std::string &url, const headers &request_headers, long &resp
     return ans;
 }
 
-class Stopwatch {
-    unsigned long long t0_;
-
-  public:
-    Stopwatch() {
-        timeval t0;
-        gettimeofday(&t0, nullptr);
-        t0_ = t0.tv_sec * 1000000ULL + t0.tv_usec;
-    }
-
-    unsigned long long micros() {
-        timeval tv;
-        gettimeofday(&tv, nullptr);
-        return tv.tv_sec * 1000ULL + tv.tv_usec - t0_;
-    }
-};
-
 // Parameters controlling request retry logic. Retryable errors:
 // - Connection errors
 // - 5xx response codes
@@ -292,6 +273,12 @@ struct RetryOptions {
     size_t min_response_body = 0;
 
     HTTP::CURLpool *connpool = nullptr;
+
+    // callback to invoke on retryable error (e.g. for logging)
+    std::function<void(Method method, const std::string &url, const headers &request_headers,
+                       CURLcode rc, long response_code, const headers &response_headers,
+                       const std::string &response_body, unsigned int attempt)>
+        on_retry = nullptr;
 };
 
 CURLcode RetryRequest(Method method, const std::string &url, const headers &request_headers,
@@ -300,28 +287,30 @@ CURLcode RetryRequest(Method method, const std::string &url, const headers &requ
     useconds_t delay = options.initial_delay;
     std::ostringstream response_body_stream;
     CURLcode rc;
+    response_body.clear();
 
     for (unsigned int i = 0; i < options.max_tries; ++i) {
         if (i) {
+            if (options.on_retry) {
+                options.on_retry(method, url, request_headers, rc, response_code, response_headers,
+                                 response_body, i + 1);
+            }
             usleep(delay);
             delay *= options.backoff_factor;
         }
 
-        // LogHeaders(request_headers);
-        Stopwatch t;
-
+        response_code = -1;
         response_headers.clear();
         response_body_stream.clear();
         rc = HTTP::Request(method, url, request_headers, response_code, response_headers,
                            response_body_stream, options.connpool);
         if (rc == CURLE_OK) {
             if (response_code >= 200 && response_code < 300) {
-                std::string body = response_body_stream.str();
+                response_body = std::move(response_body_stream.str());
                 long long content_length = ReadContentLengthHeader(response_headers);
-                if (body.size() >= options.min_response_body &&
+                if (response_body.size() >= options.min_response_body &&
                     (method == Method::HEAD || content_length < 0 ||
-                     body.size() == content_length)) {
-                    response_body = std::move(body);
+                     response_body.size() == content_length)) {
                     return CURLE_OK;
                 }
             } else if (response_code < 500 || response_code >= 600) {

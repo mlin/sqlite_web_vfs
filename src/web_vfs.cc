@@ -24,6 +24,6 @@ extern "C" int sqlite3_webvfs_init(sqlite3 *db, char **pzErrMsg, const sqlite3_a
     }
 
     int rc = SQLITE_OK;
-    rc = (new WebVFS())->Register("web");
+    rc = (new WebVFS::VFS())->Register("web");
     return rc != SQLITE_OK ? rc : SQLITE_OK_LOAD_PERMANENTLY;
 }
