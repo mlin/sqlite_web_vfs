@@ -3,6 +3,7 @@
 #include "HTTP.h"
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
+#include <set>
 
 namespace WebVFS {
 
@@ -26,28 +27,79 @@ class Timer {
     }
 };
 
+struct Extent {
+    enum Size { SM, MD, LG };
+
+    Size size;
+    size_t rank;
+
+    Extent(Size size_, size_t rank_) : size(size_), rank(rank_) {}
+
+    static size_t Bytes(Size sz) {
+        switch (sz) {
+        case Size::SM:
+            return 65536;
+        case Size::MD:
+            return 1048576;
+        }
+        return 16777216;
+    }
+
+    static Extent Containing(uint64_t offset, size_t length) {
+        auto rk = offset / Bytes(Size::SM);
+        auto hi = offset + std::max(length, size_t(1)) - 1;
+        if (rk == hi / Bytes(Size::SM)) {
+            return Extent(Size::SM, rk);
+        }
+        throw std::runtime_error("unaligned Read");
+    }
+
+    bool operator<(const Extent &rhs) const { return size < rhs.size && rank < rhs.rank; }
+
+    Extent Promote() const {
+        if (size == Size::SM) {
+            return Extent(Size::MD, rank / 16);
+        }
+        if (size == Size::MD) {
+            return Extent(Size::LG, rank / 16);
+        }
+        return *this;
+    }
+
+    uint64_t Offset() const { return Bytes(size) * rank; }
+
+    size_t Bytes() const { return Bytes(size); }
+
+    bool Contains(uint64_t offset, size_t length) const {
+        return offset >= Offset() && offset + length <= Offset() + Bytes();
+    }
+};
+
 class File : public SQLiteVFS::File {
     std::string uri_, filename_;
     sqlite_int64 file_size_;
     std::unique_ptr<HTTP::CURLpool> curlpool_;
     unsigned long log_level_ = 1;
 
-    int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
-        if (iAmt == 0) {
-            return SQLITE_OK;
-        }
+    // extents kept resident for potential reuse
+    std::map<Extent, std::pair<std::string, uint64_t>> resident_;
+    std::map<uint64_t, Extent> usage_;
+    uint64_t extent_seqno_ = 0;
+
+    int FetchExtent(Extent extent, std::string &data) {
         Timer t;
         try {
             HTTP::headers reqhdrs, reshdrs;
             std::ostringstream fmt_range;
-            fmt_range << "bytes=" << iOfst << "-" << (iOfst + iAmt - 1);
+            fmt_range << "bytes=" << extent.Offset() << "-"
+                      << (extent.Offset() + extent.Bytes() - 1);
             reqhdrs["range"] = fmt_range.str();
 
             long status = -1;
             bool retried = false;
             std::string body;
             HTTP::RetryOptions options;
-            options.min_response_body = iAmt;
+            options.min_response_body = extent.Bytes();
             options.connpool = curlpool_.get();
             options.on_retry = [&retried](HTTP::Method method, const std::string &url,
                                           const HTTP::headers &request_headers, CURLcode rc,
@@ -69,14 +121,15 @@ class File : public SQLiteVFS::File {
                 }
                 return SQLITE_IOERR_READ;
             }
-            if (body.size() != iAmt) {
+            if (body.size() != extent.Bytes()) {
                 if (log_level_) {
                     cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
                          << " incorrect response body length = " << body.size()
-                         << ", expected = " << iAmt << endl;
+                         << ", expected = " << extent.Bytes() << endl;
                 }
                 return SQLITE_IOERR_SHORT_READ;
             }
+            data = std::move(body);
             if (log_level_ > 1) {
                 cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
                      << (t.micros() / 1000) << "ms)" << endl;
@@ -84,14 +137,60 @@ class File : public SQLiteVFS::File {
                 cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK after retry ("
                      << (t.micros() / 1000) << "ms)" << endl;
             }
-
-            memcpy(zBuf, body.c_str(), iAmt);
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
             return SQLITE_IOERR_NOMEM;
-        } catch (std::exception &) {
+        } catch (std::exception &exn) {
+            if (log_level_) {
+                cerr << "HTTP GET " << filename_ << ": " << exn.what() << endl;
+            }
             return SQLITE_IOERR_READ;
         }
+    }
+
+    int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
+        if (iAmt == 0) {
+            return SQLITE_OK;
+        }
+        if (iAmt < 0 || iOfst < 0) {
+            return SQLITE_IOERR_READ;
+        }
+        const std::string *data = nullptr;
+        Extent extent(Extent::Size::SM, 0);
+
+        auto last_used = usage_.rbegin();
+        if (last_used != usage_.rend() && last_used->second.Contains(iOfst, iAmt)) {
+            // the most-recently used extent has the page we need
+            extent = last_used->second;
+            data = &(resident_.find(extent)->second.first);
+        } else {
+            // find a resident extent containing desired page
+            extent = Extent::Containing(iOfst, iAmt);
+            auto line = resident_.find(extent);
+            if (line != resident_.end()) {
+                usage_.erase(line->second.second); // old seqno
+            } else {
+                // need to fetch extent
+                std::string buf;
+                int rc = FetchExtent(extent, buf);
+                if (rc != SQLITE_OK) {
+                    return rc;
+                }
+                resident_[extent] = std::move(std::make_pair(std::move(buf), 0));
+                line = resident_.find(extent);
+            }
+            usage_.insert(std::make_pair(++extent_seqno_, extent));
+            line->second.second = extent_seqno_;
+            data = &(line->second.first);
+            while (resident_.size() > 64) {
+                // evict LRU extent
+                auto lru = usage_.begin();
+                resident_.erase(resident_.find(lru->second));
+                usage_.erase(lru->first);
+            }
+        }
+        memcpy(zBuf, data->c_str() + (iOfst - extent.Offset()), iAmt);
+        return SQLITE_OK;
     }
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override { return SQLITE_MISUSE; }
     int Truncate(sqlite3_int64 size) override { return SQLITE_MISUSE; }
@@ -167,7 +266,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 return SQLITE_CANTOPEN;
             }
             curlpool->checkin(conn);
-            std::string filename = JustFileName(uri);
+            std::string filename = FileNameForLog(uri);
             Timer t;
 
             // HEAD request to determine the database file's existence & size
@@ -212,6 +311,7 @@ class VFS : public SQLiteVFS::Wrapper {
             // will make it self-delete.
             auto webfile = new File(uri, filename, file_size, std::move(curlpool), log_level);
             webfile->InitHandle(pFile);
+            // initiate prefetch of first 64KiB
             *pOutFlags = flags;
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
@@ -228,7 +328,7 @@ class VFS : public SQLiteVFS::Wrapper {
         return SQLiteVFS::Wrapper::GetLastError(nByte, zErrMsg);
     }
 
-    std::string JustFileName(const std::string &uri) {
+    std::string FileNameForLog(const std::string &uri) {
         std::string ans = uri;
         auto p = ans.find('?');
         if (p != std::string::npos) {
@@ -237,6 +337,9 @@ class VFS : public SQLiteVFS::Wrapper {
         p = ans.rfind('/');
         if (p != std::string::npos) {
             ans = ans.substr(p + 1);
+        }
+        if (ans.size() > 97) {
+            ans = ans.substr(0, 97) + "...";
         }
         return ans;
     }
