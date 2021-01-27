@@ -129,6 +129,7 @@ class File : public SQLiteVFS::File {
     // run HTTP GET request for an extent
     int FetchExtent(Extent extent, shared_string &data) {
         Timer t;
+        const std::string protocol = uri_.substr(0, 6) == "https:" ? "HTTPS" : "HTTP";
         try {
             HTTP::headers reqhdrs, reshdrs;
             reqhdrs["range"] = extent.str(file_size_);
@@ -137,7 +138,8 @@ class File : public SQLiteVFS::File {
             bool retried = false;
             std::shared_ptr<std::string> body(new std::string());
             HTTP::RetryOptions options;
-            options.min_response_body = extent.Bytes();
+            options.min_response_body =
+                std::min(uint64_t(extent.Bytes()), uint64_t(file_size_ - extent.Offset()));
             options.connpool = curlpool_.get();
             options.on_retry = [&retried](HTTP::Method method, const std::string &url,
                                           const HTTP::headers &request_headers, CURLcode rc,
@@ -148,37 +150,42 @@ class File : public SQLiteVFS::File {
             if (rc != CURLE_OK) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << ' '
-                         << curl_easy_strerror(rc) << endl;
+                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"] << ' '
+                         << curl_easy_strerror(rc) << endl
+                         << std::flush;
                 }
                 return SQLITE_IOERR_READ;
             }
             if (status < 200 || status >= 300) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
-                         << " error status = " << status << endl;
+                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
+                         << " error status = " << status << endl
+                         << std::flush;
                 }
                 return SQLITE_IOERR_READ;
             }
-            if (body->size() != extent.Bytes()) {
+            if (body->size() != options.min_response_body) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
+                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
                          << " incorrect response body length = " << body->size()
-                         << ", expected = " << extent.Bytes() << endl;
+                         << ", expected = " << extent.Bytes() << endl
+                         << std::flush;
                 }
                 return SQLITE_IOERR_SHORT_READ;
             }
             data = body;
             if (log_level_ > 1) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
-                     << (t.micros() / 1000) << "ms)" << endl;
+                cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
+                     << (t.micros() / 1000) << "ms)" << endl
+                     << std::flush;
             } else if (log_level_ && retried) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK after retry ("
-                     << (t.micros() / 1000) << "ms)" << endl;
+                cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
+                     << " OK after retry (" << (t.micros() / 1000) << "ms)" << endl
+                     << std::flush;
             }
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
@@ -186,7 +193,8 @@ class File : public SQLiteVFS::File {
         } catch (std::exception &exn) {
             if (log_level_) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << "HTTP GET " << filename_ << ": " << exn.what() << endl;
+                cerr << protocol << " GET " << filename_ << ": " << exn.what() << endl
+                     << std::flush;
             }
             return SQLITE_IOERR_READ;
         }
@@ -235,25 +243,19 @@ class File : public SQLiteVFS::File {
         return nullptr;
     }
 
-    std::map<Extent, ResidentExtent>::iterator FindResidentExtent(uint64_t offset, size_t length) {
-        Extent extent = Extent::Containing(offset, length);
-        auto line = resident_.find(extent);
-        for (int i = 0; i < 2 && line == resident_.end(); ++i) {
-            line = resident_.find((extent = extent.Promote()));
-        }
-        return line;
-    }
-
     void UpdateResident(std::unique_lock<std::mutex> &lock) {
+        // main thread collects results of recent background fetch jobs
         assert(lock.owns_lock());
-        // surface any errors recorded by background fetch jobs
+
+        // surface any errors recorded
         auto err = fetch_error_.begin();
         if (err != fetch_error_.end()) {
             int rc = err->second;
             fetch_error_.erase(err);
             throw rc;
         }
-        // merge recently-fetched extents into resident_ (& update usage_)
+
+        // merge successfully fetched extents into resident_ (& update usage_)
         for (auto p = fetch_done_.begin(); p != fetch_done_.end(); p = fetch_done_.erase(p)) {
             Extent extent = p->first;
             if (resident_.find(extent) == resident_.end()) {
@@ -261,6 +263,15 @@ class File : public SQLiteVFS::File {
                 resident_.emplace(extent, ResidentExtent(extent, p->second, extent_seqno_));
             }
         }
+    }
+
+    std::map<Extent, ResidentExtent>::iterator FindResidentExtent(uint64_t offset, size_t length) {
+        Extent extent = Extent::Containing(offset, length);
+        auto line = resident_.find(extent);
+        for (int i = 0; i < 2 && line == resident_.end(); ++i) {
+            line = resident_.find((extent = extent.Promote()));
+        }
+        return line;
     }
 
     ResidentExtent EnsureResidentExtent(uint64_t offset, size_t length) {
@@ -281,16 +292,18 @@ class File : public SQLiteVFS::File {
                 // front-enqueue job to fetch the extent
                 Extent extent = Extent::Containing(offset, length);
                 // if we already have an adjacent extent (at any size), promote to next size up
-                Extent container = extent;
-                for (int i = 0; i < 2; ++i) {
-                    if (container.rank > 0 &&
-                            resident_.find(Extent(container.size, container.rank - 1)) !=
-                                resident_.end() ||
-                        resident_.find(Extent(container.size, container.rank + 1)) !=
-                            resident_.end()) {
-                        extent = container.Promote();
+                if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
+                    Extent container = extent;
+                    for (int i = 0; i < 2; ++i) {
+                        if (container.rank > 0 &&
+                                resident_.find(Extent(container.size, container.rank - 1)) !=
+                                    resident_.end() ||
+                            resident_.find(Extent(container.size, container.rank + 1)) !=
+                                resident_.end()) {
+                            extent = container.Promote();
+                        }
+                        container = container.Promote();
                     }
-                    container = container.Promote();
                 }
                 if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
                     fetch_queue_.push_front(extent);
@@ -466,6 +479,7 @@ class VFS : public SQLiteVFS::Wrapper {
             }
             curlpool->checkin(conn);
             std::string filename = FileNameForLog(uri);
+            const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP";
             Timer t;
 
             // HEAD request to determine the database file's existence & size
@@ -475,7 +489,7 @@ class VFS : public SQLiteVFS::Wrapper {
             options.connpool = curlpool.get();
             CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
             if (rc != CURLE_OK) {
-                last_error_ = "HTTP HEAD " + filename + ": ";
+                last_error_ = protocol + " HEAD " + filename + ": ";
                 last_error_ += curl_easy_strerror(rc);
                 if (log_level) {
                     cerr << last_error_ << endl;
@@ -484,7 +498,7 @@ class VFS : public SQLiteVFS::Wrapper {
             }
             if (status < 200 || status >= 300) {
                 last_error_ =
-                    "HTTP HEAD " + filename + ": error status = " + std::to_string(status);
+                    protocol + " HEAD " + filename + ": error status = " + std::to_string(status);
                 if (log_level) {
                     cerr << last_error_ << endl;
                 }
@@ -494,15 +508,15 @@ class VFS : public SQLiteVFS::Wrapper {
             // parse content-length
             long long file_size = HTTP::ReadContentLengthHeader(reshdrs);
             if (file_size < 0) {
-                last_error_ =
-                    "HTTP HEAD " + filename + ":response lacking valid content-length header";
+                last_error_ = protocol + " HEAD " + filename +
+                              ":response lacking valid content-length header";
                 if (log_level) {
                     cerr << last_error_ << endl;
                 }
                 return SQLITE_IOERR_READ;
             }
             if (log_level > 1) {
-                cerr << "HTTP HEAD " << filename << " content-length: " << file_size << " ("
+                cerr << protocol << " HEAD " << filename << " content-length: " << file_size << " ("
                      << (t.micros() / 1000) << "ms)" << endl;
             }
 
