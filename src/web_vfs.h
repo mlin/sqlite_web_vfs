@@ -27,6 +27,8 @@ class Timer {
     }
 };
 
+// Extent: a contiguous portion of the remote file which we keep cached in memory. Three size
+// options to balance latency, throughput, read amplification, HTTP request count.
 struct Extent {
     enum Size { SM, MD, LG };
 
@@ -78,49 +80,62 @@ struct Extent {
 
     bool Contains(const Extent &rhs) const { return Contains(rhs.Offset(), rhs.Bytes()); }
 
-    std::string str() const {
+    bool Exists(uint64_t file_size_) const { return Offset() < file_size_; }
+
+    std::string str(uint64_t file_size) const {
+        auto hi = std::min((Offset() + Bytes() - 1), file_size - 1);
         std::ostringstream fmt_range;
-        fmt_range << "bytes=" << Offset() << "-" << (Offset() + Bytes() - 1);
+        fmt_range << "bytes=" << Offset() << "-" << hi;
         return fmt_range.str();
     }
 };
 
 class File : public SQLiteVFS::File {
-    std::string uri_, filename_;
-    sqlite_int64 file_size_;
-    std::unique_ptr<HTTP::CURLpool> curlpool_;
-    unsigned long log_level_ = 1;
+    const std::string uri_, filename_;
+    const sqlite_int64 file_size_;
+    const std::unique_ptr<HTTP::CURLpool> curlpool_;
+    const unsigned long log_level_ = 1;
 
-    // extents resident for potential reuse, with a last-use timestamp
+    // Extents cached for potential reuse, with a last-use timestamp for LRU eviction.
+    // Note: The purpose of keeping extents cached is to anticipate future Read requests for nearby
+    //       database pages. It is NOT to serve repeat Reads for the same page, which is the job of
+    //       the SQLite page cache in front of the VFS.
+    using shared_string = std::shared_ptr<const std::string>;
     struct ResidentExtent {
-        std::string data;
+        const Extent extent;
+        shared_string data;
         uint64_t seqno;
-        ResidentExtent(std::string &&data_, uint64_t seqno_)
-            : data(std::move(data_)), seqno(seqno_) {}
-        ResidentExtent(ResidentExtent &&rhs) : data(std::move(rhs.data)), seqno(rhs.seqno) {}
+        ResidentExtent(Extent extent_, const shared_string &data_, uint64_t seqno_)
+            : extent(extent_), data(data_), seqno(seqno_) {}
     };
     std::map<Extent, ResidentExtent> resident_;
-    std::map<uint64_t, Extent> usage_; // secondary index of resident_ ordered by LRU
+    std::map<uint64_t, Extent> usage_; // secondary index of resident_ ordered by seqno (for LRU)
+    uint64_t extent_seqno_ = 0;        // timestamp
+    ThreadPool threadpool_;
+
+    // The main thread locks mu_ to update resident_ and usage_, but may read them without.
+    // Background threads may (only) read them with mu_ locked.
+    // The other state below always requires mu_ to read or write.
+    std::mutex mu_;
 
     // state for [pre]fetch on background threads
-    std::mutex mu_;
-    std::condition_variable fetch_cv_;
-    std::deque<Extent> fetch_queue_;
-    std::set<Extent> fetch_wip_;
-    std::map<Extent, std::string> fetch_done_;
-    std::map<Extent, int> fetch_error_;
-    ThreadPoolWithEnqueueFast threadpool_;
-    uint64_t extent_seqno_ = 0; // timestamp
+    std::deque<Extent> fetch_queue_;             // queue of fetch ops
+    std::set<Extent> fetch_queue2_;              // secondary index of fetch_queue_
+    std::set<Extent> fetch_wip_;                 // fetch ops currently underway
+    std::map<Extent, shared_string> fetch_done_; // completed fetches waiting to be merged
+    std::map<Extent, int> fetch_error_;          // error codes
+    std::condition_variable fetch_cv_;           // on add to fetch_done_ or fetch_error_
 
-    int FetchExtent(Extent extent, std::string &data) {
+    // run HTTP GET request for an extent
+    int FetchExtent(Extent extent, shared_string &data) {
         Timer t;
         try {
             HTTP::headers reqhdrs, reshdrs;
-            reqhdrs["range"] = extent.str();
+            reqhdrs["range"] = extent.str(file_size_);
 
             long status = -1;
             bool retried = false;
-            std::string body;
+            std::shared_ptr<std::string> body(new std::string());
             HTTP::RetryOptions options;
             options.min_response_body = extent.Bytes();
             options.connpool = curlpool_.get();
@@ -129,9 +144,10 @@ class File : public SQLiteVFS::File {
                                           long response_code, const HTTP::headers &response_headers,
                                           const std::string &response_body,
                                           unsigned int attempt) { retried = true; };
-            auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, body, options);
+            auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, *body, options);
             if (rc != CURLE_OK) {
                 if (log_level_) {
+                    std::lock_guard<std::mutex> lock(mu_);
                     cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << ' '
                          << curl_easy_strerror(rc) << endl;
                 }
@@ -139,24 +155,28 @@ class File : public SQLiteVFS::File {
             }
             if (status < 200 || status >= 300) {
                 if (log_level_) {
+                    std::lock_guard<std::mutex> lock(mu_);
                     cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
                          << " error status = " << status << endl;
                 }
                 return SQLITE_IOERR_READ;
             }
-            if (body.size() != extent.Bytes()) {
+            if (body->size() != extent.Bytes()) {
                 if (log_level_) {
+                    std::lock_guard<std::mutex> lock(mu_);
                     cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"]
-                         << " incorrect response body length = " << body.size()
+                         << " incorrect response body length = " << body->size()
                          << ", expected = " << extent.Bytes() << endl;
                 }
                 return SQLITE_IOERR_SHORT_READ;
             }
-            data = std::move(body);
+            data = body;
             if (log_level_ > 1) {
+                std::lock_guard<std::mutex> lock(mu_);
                 cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
                      << (t.micros() / 1000) << "ms)" << endl;
             } else if (log_level_ && retried) {
+                std::lock_guard<std::mutex> lock(mu_);
                 cerr << "HTTP GET " << filename_ << ' ' << reqhdrs["range"] << " OK after retry ("
                      << (t.micros() / 1000) << "ms)" << endl;
             }
@@ -165,6 +185,7 @@ class File : public SQLiteVFS::File {
             return SQLITE_IOERR_NOMEM;
         } catch (std::exception &exn) {
             if (log_level_) {
+                std::lock_guard<std::mutex> lock(mu_);
                 cerr << "HTTP GET " << filename_ << ": " << exn.what() << endl;
             }
             return SQLITE_IOERR_READ;
@@ -176,8 +197,10 @@ class File : public SQLiteVFS::File {
 
         std::unique_lock<std::mutex> lock(self->mu_);
 
+        // dequeue a desired extent
         Extent extent = self->fetch_queue_.front();
         self->fetch_queue_.pop_front();
+        self->fetch_queue2_.erase(extent);
 
         // coalesce request if same extent or one containing it is already wip or done
         Extent container = extent;
@@ -190,17 +213,19 @@ class File : public SQLiteVFS::File {
             container = extent.Promote();
         }
 
+        // run HTTP GET
         self->fetch_wip_.insert(extent);
         lock.unlock();
-        std::string buf;
+        shared_string buf;
         int rc = self->FetchExtent(extent, buf);
         lock.lock();
 
+        // record result
         self->fetch_wip_.erase(extent);
         assert(self->fetch_done_.find(extent) == self->fetch_done_.end() &&
                self->fetch_error_.find(extent) == self->fetch_error_.end());
         if (rc == SQLITE_OK) {
-            self->fetch_done_.emplace(std::make_pair(extent, std::move(buf)));
+            self->fetch_done_.emplace(extent, buf);
         } else {
             self->fetch_error_[extent] = rc;
         }
@@ -211,7 +236,6 @@ class File : public SQLiteVFS::File {
     }
 
     std::map<Extent, ResidentExtent>::iterator FindResidentExtent(uint64_t offset, size_t length) {
-        // TODO: prefer large extents first
         Extent extent = Extent::Containing(offset, length);
         auto line = resident_.find(extent);
         for (int i = 0; i < 2 && line == resident_.end(); ++i) {
@@ -220,25 +244,132 @@ class File : public SQLiteVFS::File {
         return line;
     }
 
-    int UpdateResident(std::unique_lock<std::mutex> &lock) {
+    void UpdateResident(std::unique_lock<std::mutex> &lock) {
         assert(lock.owns_lock());
         // surface any errors recorded by background fetch jobs
         auto err = fetch_error_.begin();
         if (err != fetch_error_.end()) {
             int rc = err->second;
             fetch_error_.erase(err);
-            return rc;
+            throw rc;
         }
         // merge recently-fetched extents into resident_ (& update usage_)
         for (auto p = fetch_done_.begin(); p != fetch_done_.end(); p = fetch_done_.erase(p)) {
             Extent extent = p->first;
             if (resident_.find(extent) == resident_.end()) {
                 usage_[++extent_seqno_] = extent;
-                resident_.emplace(std::move(std::make_pair(
-                    extent, std::move(ResidentExtent(std::move(p->second), extent_seqno_)))));
+                resident_.emplace(extent, ResidentExtent(extent, p->second, extent_seqno_));
             }
         }
-        return SQLITE_OK;
+    }
+
+    ResidentExtent EnsureResidentExtent(uint64_t offset, size_t length) {
+        auto last_used = usage_.rbegin();
+        if (last_used != usage_.rend() && last_used->second.Contains(offset, length)) {
+            // most-recently used extent still has the page we need (hot path, doesn't lock mu_)
+            auto p = resident_.find(last_used->second);
+            assert(p != resident_.end());
+            return p->second;
+        }
+        std::unique_lock<std::mutex> lock(mu_);
+        // find a resident extent containing desired page
+        auto line = FindResidentExtent(offset, length);
+        if (line == resident_.end()) {
+            // page isn't resident; first, check if it's among any recently-completed fetches
+            UpdateResident(lock);
+            if ((line = FindResidentExtent(offset, length)) == resident_.end()) {
+                // front-enqueue job to fetch the extent
+                Extent extent = Extent::Containing(offset, length);
+                // if we already have an adjacent extent (at any size), promote to next size up
+                Extent container = extent;
+                for (int i = 0; i < 2; ++i) {
+                    if (container.rank > 0 &&
+                            resident_.find(Extent(container.size, container.rank - 1)) !=
+                                resident_.end() ||
+                        resident_.find(Extent(container.size, container.rank + 1)) !=
+                            resident_.end()) {
+                        extent = container.Promote();
+                    }
+                    container = container.Promote();
+                }
+                if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
+                    fetch_queue_.push_front(extent);
+                    fetch_queue2_.insert(extent);
+                    threadpool_.Enqueue(this, FetchJob, nullptr);
+                }
+                do {
+                    fetch_cv_.wait(lock);
+                    UpdateResident(lock);
+                } while ((line = FindResidentExtent(offset, length)) == resident_.end());
+            }
+        } else {
+            Extent extent = line->first;
+            // upon finding the desired page in a resident extent, decide whether to initiate
+            // background prefetch operations for other, nearby extents
+            if (extent.size < Extent::Size::LG) {
+                // if we have r-1 or r+1 resident, initiate prefetch of the next size up
+                Extent promoted = extent.Promote();
+                if ((extent.rank > 0 &&
+                         resident_.find(Extent(extent.size, extent.rank - 1)) != resident_.end() ||
+                     resident_.find(Extent(extent.size, extent.rank + 1)) != resident_.end()) &&
+                    fetch_queue2_.find(promoted) == fetch_queue2_.end() &&
+                    resident_.find(promoted) == resident_.end()) {
+                    fetch_queue_.push_back(promoted);
+                    fetch_queue2_.insert(promoted);
+                    threadpool_.Enqueue(this, FetchJob, nullptr);
+                }
+            } else {
+                // large size: if we have r-1 resident, prefetch r+1, and vice versa
+                for (int ofs = 1; ofs <= 4; ++ofs) {
+                    if (extent.rank >= ofs &&
+                        resident_.find(Extent(Extent::Size::LG, extent.rank - ofs)) !=
+                            resident_.end()) {
+                        Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
+                        if (succ.Exists(file_size_) && resident_.find(succ) == resident_.end() &&
+                            fetch_queue2_.find(succ) == fetch_queue2_.end()) {
+                            fetch_queue_.push_back(succ);
+                            fetch_queue2_.insert(succ);
+                            threadpool_.Enqueue(this, FetchJob, nullptr);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                for (int ofs = 1; ofs <= 4; ++ofs) {
+                    if (extent.rank >= ofs &&
+                        resident_.find(Extent(Extent::Size::LG, extent.rank + ofs)) !=
+                            resident_.end()) {
+                        Extent pred = Extent(Extent::Size::LG, extent.rank - ofs);
+                        if (resident_.find(pred) == resident_.end() &&
+                            fetch_queue2_.find(pred) == fetch_queue2_.end()) {
+                            fetch_queue_.push_back(pred);
+                            fetch_queue2_.insert(pred);
+                            threadpool_.Enqueue(this, FetchJob, nullptr);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // LRU bookkeeping: delete old seqno_ from the secondary index, then record the new one
+        assert(!(line->first < line->second.extent || line->second.extent < line->first));
+        assert(usage_.find(line->second.seqno) != usage_.end());
+        usage_.erase(line->second.seqno); // old seqno
+        usage_[++extent_seqno_] = line->first;
+        line->second.seqno = extent_seqno_;
+
+        // evict LRU extents if needed; this comes last to ensure we won't evict the extent we
+        // just decided to use!
+        while (resident_.size() > 40) {
+            auto lru = usage_.begin();
+            assert(lru->second < line->first || line->first < lru->second);
+            resident_.erase(resident_.find(lru->second));
+            usage_.erase(lru->first);
+        }
+
+        return line->second;
     }
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
@@ -248,76 +379,17 @@ class File : public SQLiteVFS::File {
         if (iAmt < 0 || iOfst < 0) {
             return SQLITE_IOERR_READ;
         }
-        const std::string *data = nullptr;
-        Extent extent;
-
-        auto last_used = usage_.rbegin();
-        if (last_used != usage_.rend() && last_used->second.Contains(iOfst, iAmt)) {
-            // most-recently used extent still has the page we need
-            extent = last_used->second;
-            data = &(resident_.find(extent)->second.data);
-        } else {
-            // find a resident extent containing desired page
-            auto line = FindResidentExtent(iOfst, iAmt);
-            if (line == resident_.end()) {
-                // page isn't resident; first, merge in any recently-completed fetches and check
-                // again (deferred so that critical path usually doesn't acquire mu_)
-                std::unique_lock<std::mutex> lock(mu_);
-                int rc = UpdateResident(lock);
-                if (rc != SQLITE_OK) {
-                    return rc;
-                }
-                if ((line = FindResidentExtent(iOfst, iAmt)) == resident_.end()) {
-                    // front-enqueue job to fetch the extent
-                    extent = Extent::Containing(iOfst, iAmt);
-                    // if we already have an adjacent extent (at any size), promote to next size up
-                    Extent container = extent;
-                    for (int i = 0; i < 2; ++i) {
-                        if (container.rank > 0 &&
-                                resident_.find(Extent(container.size, container.rank - 1)) !=
-                                    resident_.end() ||
-                            resident_.find(Extent(container.size, container.rank + 1)) !=
-                                resident_.end()) {
-                            extent = container.Promote();
-                        }
-                        container = container.Promote();
-                    }
-                    fetch_queue_.push_front(extent);
-                    threadpool_.Enqueue(this, FetchJob, nullptr);
-                    do {
-                        fetch_cv_.wait(lock);
-                        if ((rc = UpdateResident(lock)) != SQLITE_OK) {
-                            return rc;
-                        }
-                    } while ((line = FindResidentExtent(iOfst, iAmt)) == resident_.end());
-                }
-            } else {
-                // TODO on hit to extent r:
-                // if r size is less than LG and we have r-1 or r+1 resident, promote & prefetch
-                // if r size is LG: if we have r-1 resident but not r+1, prefetch r+1.
-                //                  if we have r+1 resident but not r-1, prefetch r-1.
-            }
-
-            extent = line->first;
-            data = &(line->second.data);
-            // LRU bookkeeping: delete old seqno_ from the secondary index, then record the new one
-            assert(usage_.find(line->second.seqno) != usage_.end());
-            usage_.erase(line->second.seqno); // old seqno
-            usage_[++extent_seqno_] = extent;
-            line->second.seqno = extent_seqno_;
-
-            // evict LRU extents if needed; this comes last to ensure we won't evict the extent we
-            // just decided to use!
-            while (resident_.size() > 40) {
-                auto lru = usage_.begin();
-                assert(lru->second < extent || extent < lru->second);
-                resident_.erase(resident_.find(lru->second));
-                usage_.erase(lru->first);
-            }
+        try {
+            ResidentExtent resext = EnsureResidentExtent(iOfst, iAmt);
+            assert(resext.extent.Contains(iOfst, iAmt));
+            assert(resext.data->size() + resext.extent.Offset() >= iOfst + iAmt);
+            memcpy(zBuf, resext.data->c_str() + (iOfst - resext.extent.Offset()), iAmt);
+            return SQLITE_OK;
+        } catch (int rc) {
+            return rc != SQLITE_OK ? rc : SQLITE_IOERR_READ;
+        } catch (std::bad_alloc &) {
+            return SQLITE_IOERR_NOMEM;
         }
-
-        memcpy(zBuf, data->c_str() + (iOfst - extent.Offset()), iAmt);
-        return SQLITE_OK;
     }
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override { return SQLITE_MISUSE; }
     int Truncate(sqlite3_int64 size) override { return SQLITE_MISUSE; }
