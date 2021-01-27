@@ -385,13 +385,21 @@ class Wrapper : public Base {
         }
         memset(wrapped_file.get(), 0, wrapped_->szOsFile);
 
+        int rc = wrapped_->xOpen(wrapped_, zName, wrapped_file.get(), flags, pOutFlags);
+        if (rc != SQLITE_OK) {
+            if (wrapped_file->pMethods) {
+                wrapped_file->pMethods->xClose(wrapped_file.get());
+            }
+            return rc;
+        }
+
         auto fw = NewFileWrapper(zName, flags, wrapped_file);
         fw->InitHandle(pFile);
         assert(pFile->pMethods);
         // Since pFile->pMethods is now set, caller is required to invoke xClose(), which in turn
         // closes+frees the wrapped_file and deletes the FileWrapper.
         fw.release();
-        return wrapped_->xOpen(wrapped_, zName, wrapped_file.get(), flags, pOutFlags);
+        return SQLITE_OK;
     }
     int Delete(const char *zPath, int syncDir) override {
         return wrapped_->xDelete(wrapped_, zPath, syncDir);

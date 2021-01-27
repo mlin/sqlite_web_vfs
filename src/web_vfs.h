@@ -105,13 +105,14 @@ class File : public SQLiteVFS::File {
         const Extent extent;
         shared_string data;
         uint64_t seqno;
+        bool used = false;
         ResidentExtent(Extent extent_, const shared_string &data_, uint64_t seqno_)
             : extent(extent_), data(data_), seqno(seqno_) {}
     };
     std::map<Extent, ResidentExtent> resident_;
     std::map<uint64_t, Extent> usage_; // secondary index of resident_ ordered by seqno (for LRU)
     uint64_t extent_seqno_ = 0;        // timestamp
-    ThreadPool threadpool_;
+    ThreadPoolWithEnqueueFast threadpool_;
 
     // The main thread locks mu_ to update resident_ and usage_, but may read them without.
     // Background threads may (only) read them with mu_ locked.
@@ -218,7 +219,7 @@ class File : public SQLiteVFS::File {
                 self->fetch_done_.find(container) != self->fetch_done_.end()) {
                 return nullptr;
             }
-            container = extent.Promote();
+            container = container.Promote();
         }
 
         // run HTTP GET
@@ -274,6 +275,11 @@ class File : public SQLiteVFS::File {
         return line;
     }
 
+    bool ResidentAndUsed(Extent extent) {
+        auto p = resident_.find(Extent(extent.size, extent.rank - 1));
+        return p != resident_.end() && p->second.used;
+    }
+
     ResidentExtent EnsureResidentExtent(uint64_t offset, size_t length) {
         auto last_used = usage_.rbegin();
         if (last_used != usage_.rend() && last_used->second.Contains(offset, length)) {
@@ -308,7 +314,7 @@ class File : public SQLiteVFS::File {
                 if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
                     fetch_queue_.push_front(extent);
                     fetch_queue2_.insert(extent);
-                    threadpool_.Enqueue(this, FetchJob, nullptr);
+                    threadpool_.EnqueueFast(this, FetchJob, nullptr);
                 }
                 do {
                     fetch_cv_.wait(lock);
@@ -320,29 +326,27 @@ class File : public SQLiteVFS::File {
             // upon finding the desired page in a resident extent, decide whether to initiate
             // background prefetch operations for other, nearby extents
             if (extent.size < Extent::Size::LG) {
-                // if we have r-1 or r+1 resident, initiate prefetch of the next size up
+                // if we used r-1 or r+1, initiate prefetch of the next size up
                 Extent promoted = extent.Promote();
-                if ((extent.rank > 0 &&
-                         resident_.find(Extent(extent.size, extent.rank - 1)) != resident_.end() ||
-                     resident_.find(Extent(extent.size, extent.rank + 1)) != resident_.end()) &&
+                if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1)) ||
+                     ResidentAndUsed(Extent(extent.size, extent.rank + 1))) &&
                     fetch_queue2_.find(promoted) == fetch_queue2_.end() &&
                     resident_.find(promoted) == resident_.end()) {
                     fetch_queue_.push_back(promoted);
                     fetch_queue2_.insert(promoted);
-                    threadpool_.Enqueue(this, FetchJob, nullptr);
+                    threadpool_.EnqueueFast(this, FetchJob, nullptr);
                 }
             } else {
-                // large size: if we have r-1 resident, prefetch r+1, and vice versa
+                // large size: if we used r-1 resident, prefetch r+1, and vice versa
                 for (int ofs = 1; ofs <= 4; ++ofs) {
                     if (extent.rank >= ofs &&
-                        resident_.find(Extent(Extent::Size::LG, extent.rank - ofs)) !=
-                            resident_.end()) {
+                        ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
                         Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
                         if (succ.Exists(file_size_) && resident_.find(succ) == resident_.end() &&
                             fetch_queue2_.find(succ) == fetch_queue2_.end()) {
                             fetch_queue_.push_back(succ);
                             fetch_queue2_.insert(succ);
-                            threadpool_.Enqueue(this, FetchJob, nullptr);
+                            threadpool_.EnqueueFast(this, FetchJob, nullptr);
                         }
                     } else {
                         break;
@@ -350,14 +354,13 @@ class File : public SQLiteVFS::File {
                 }
                 for (int ofs = 1; ofs <= 4; ++ofs) {
                     if (extent.rank >= ofs &&
-                        resident_.find(Extent(Extent::Size::LG, extent.rank + ofs)) !=
-                            resident_.end()) {
+                        ResidentAndUsed(Extent(Extent::Size::LG, extent.rank + ofs))) {
                         Extent pred = Extent(Extent::Size::LG, extent.rank - ofs);
                         if (resident_.find(pred) == resident_.end() &&
                             fetch_queue2_.find(pred) == fetch_queue2_.end()) {
                             fetch_queue_.push_back(pred);
                             fetch_queue2_.insert(pred);
-                            threadpool_.Enqueue(this, FetchJob, nullptr);
+                            threadpool_.EnqueueFast(this, FetchJob, nullptr);
                         }
                     } else {
                         break;
@@ -372,6 +375,7 @@ class File : public SQLiteVFS::File {
         usage_.erase(line->second.seqno); // old seqno
         usage_[++extent_seqno_] = line->first;
         line->second.seqno = extent_seqno_;
+        line->second.used = true;
 
         // evict LRU extents if needed; this comes last to ensure we won't evict the extent we
         // just decided to use!
@@ -447,7 +451,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
     int Open(const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) override {
         if (!zName || strcmp(zName, "/__web__")) {
-            return SQLiteVFS::Wrapper::Open(zName, pFile, flags, pOutFlags);
+            return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
         }
         const char *encoded_uri = sqlite3_uri_parameter(zName, "web_uri");
         if (!encoded_uri || !encoded_uri[0]) {
@@ -482,42 +486,45 @@ class VFS : public SQLiteVFS::Wrapper {
             const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP";
             Timer t;
 
-            // HEAD request to determine the database file's existence & size
-            HTTP::headers reqhdrs, reshdrs;
-            long status = -1;
-            HTTP::RetryOptions options;
-            options.connpool = curlpool.get();
-            CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
-            if (rc != CURLE_OK) {
-                last_error_ = protocol + " HEAD " + filename + ": ";
-                last_error_ += curl_easy_strerror(rc);
-                if (log_level) {
-                    cerr << last_error_ << endl;
+            long long file_size = sqlite3_uri_int64(zName, "web_content_length", -1);
+            if (file_size <= 0) {
+                // HEAD request to determine the database file's existence & size
+                HTTP::headers reqhdrs, reshdrs;
+                long status = -1;
+                HTTP::RetryOptions options;
+                options.connpool = curlpool.get();
+                CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
+                if (rc != CURLE_OK) {
+                    last_error_ = protocol + " HEAD " + filename + ": ";
+                    last_error_ += curl_easy_strerror(rc);
+                    if (log_level) {
+                        cerr << last_error_ << endl;
+                    }
+                    return SQLITE_IOERR_READ;
                 }
-                return SQLITE_IOERR_READ;
-            }
-            if (status < 200 || status >= 300) {
-                last_error_ =
-                    protocol + " HEAD " + filename + ": error status = " + std::to_string(status);
-                if (log_level) {
-                    cerr << last_error_ << endl;
+                if (status < 200 || status >= 300) {
+                    last_error_ = protocol + " HEAD " + filename +
+                                  ": error status = " + std::to_string(status);
+                    if (log_level) {
+                        cerr << last_error_ << endl;
+                    }
+                    return SQLITE_CANTOPEN;
                 }
-                return SQLITE_CANTOPEN;
-            }
 
-            // parse content-length
-            long long file_size = HTTP::ReadContentLengthHeader(reshdrs);
-            if (file_size < 0) {
-                last_error_ = protocol + " HEAD " + filename +
-                              ":response lacking valid content-length header";
-                if (log_level) {
-                    cerr << last_error_ << endl;
+                // parse content-length
+                file_size = HTTP::ReadContentLengthHeader(reshdrs);
+                if (file_size < 0) {
+                    last_error_ = protocol + " HEAD " + filename +
+                                  ":response lacking valid content-length header";
+                    if (log_level) {
+                        cerr << last_error_ << endl;
+                    }
+                    return SQLITE_IOERR_READ;
                 }
-                return SQLITE_IOERR_READ;
-            }
-            if (log_level > 1) {
-                cerr << protocol << " HEAD " << filename << " content-length: " << file_size << " ("
-                     << (t.micros() / 1000) << "ms)" << endl;
+                if (log_level > 1) {
+                    cerr << protocol << " HEAD " << filename << " content-length: " << file_size
+                         << " (" << (t.micros() / 1000) << "ms)" << endl;
+                }
             }
 
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
