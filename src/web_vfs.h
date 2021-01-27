@@ -127,6 +127,9 @@ class File : public SQLiteVFS::File {
     std::map<Extent, int> fetch_error_;          // error codes
     std::condition_variable fetch_cv_;           // on add to fetch_done_ or fetch_error_
 
+    // performance counters
+    uint64_t read_count_ = 0, fetch_count_ = 0, read_bytes_ = 0, fetch_bytes_ = 0;
+
     // run HTTP GET request for an extent
     int FetchExtent(Extent extent, shared_string &data) {
         Timer t;
@@ -151,8 +154,8 @@ class File : public SQLiteVFS::File {
             if (rc != CURLE_OK) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"] << ' '
-                         << curl_easy_strerror(rc) << endl
+                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
+                         << ' ' << curl_easy_strerror(rc) << endl
                          << std::flush;
                 }
                 return SQLITE_IOERR_READ;
@@ -160,7 +163,7 @@ class File : public SQLiteVFS::File {
             if (status < 200 || status >= 300) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
+                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << " error status = " << status << endl
                          << std::flush;
                 }
@@ -169,7 +172,7 @@ class File : public SQLiteVFS::File {
             if (body->size() != options.min_response_body) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
-                    cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
+                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << " incorrect response body length = " << body->size()
                          << ", expected = " << extent.Bytes() << endl
                          << std::flush;
@@ -179,12 +182,12 @@ class File : public SQLiteVFS::File {
             data = body;
             if (log_level_ > 1) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"] << " OK ("
-                     << (t.micros() / 1000) << "ms)" << endl
+                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
+                     << " OK (" << (t.micros() / 1000) << "ms)" << endl
                      << std::flush;
             } else if (log_level_ && retried) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << protocol << " GET " << filename_ << ' ' << reqhdrs["range"]
+                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " OK after retry (" << (t.micros() / 1000) << "ms)" << endl
                      << std::flush;
             }
@@ -194,7 +197,7 @@ class File : public SQLiteVFS::File {
         } catch (std::exception &exn) {
             if (log_level_) {
                 std::lock_guard<std::mutex> lock(mu_);
-                cerr << protocol << " GET " << filename_ << ": " << exn.what() << endl
+                cerr << "[" << filename_ << "] " << protocol << " GET: " << exn.what() << endl
                      << std::flush;
             }
             return SQLITE_IOERR_READ;
@@ -234,6 +237,8 @@ class File : public SQLiteVFS::File {
         assert(self->fetch_done_.find(extent) == self->fetch_done_.end() &&
                self->fetch_error_.find(extent) == self->fetch_error_.end());
         if (rc == SQLITE_OK) {
+            self->fetch_count_++;
+            self->fetch_bytes_ += buf->size();
             self->fetch_done_.emplace(extent, buf);
         } else {
             self->fetch_error_[extent] = rc;
@@ -390,9 +395,6 @@ class File : public SQLiteVFS::File {
     }
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
-        if (iAmt == 0) {
-            return SQLITE_OK;
-        }
         if (iAmt < 0 || iOfst < 0) {
             return SQLITE_IOERR_READ;
         }
@@ -401,6 +403,8 @@ class File : public SQLiteVFS::File {
             assert(resext.extent.Contains(iOfst, iAmt));
             assert(resext.data->size() + resext.extent.Offset() >= iOfst + iAmt);
             memcpy(zBuf, resext.data->c_str() + (iOfst - resext.extent.Offset()), iAmt);
+            read_count_++;
+            read_bytes_ += iAmt;
             return SQLITE_OK;
         } catch (int rc) {
             return rc != SQLITE_OK ? rc : SQLITE_IOERR_READ;
@@ -408,6 +412,18 @@ class File : public SQLiteVFS::File {
             return SQLITE_IOERR_NOMEM;
         }
     }
+
+    int Close() override {
+        if (log_level_ > 2) {
+            cerr << "[" << filename_ << "] page reads: " << read_count_
+                 << ", HTTP GETs: " << fetch_count_
+                 << ", bytes read / downloaded / filesize: " << read_bytes_ << " / " << fetch_bytes_
+                 << " / " << file_size_ << endl
+                 << std::flush;
+        }
+        return SQLiteVFS::File::Close();
+    }
+
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override { return SQLITE_MISUSE; }
     int Truncate(sqlite3_int64 size) override { return SQLITE_MISUSE; }
     int Sync(int flags) override { return SQLITE_MISUSE; }
