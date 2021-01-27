@@ -4,7 +4,13 @@
 
 This [virtual filesystem extension](https://www.sqlite.org/vfs.html) provides read-only access to database files over HTTP(S), including S3 and the like, without going through a FUSE mount (which is a fine alternative when available).
 
-With the [extension loaded](https://sqlite.org/loadext.html), use the normal SQLite3 API to open the special URI `file:/__web__?vfs=web&mode=ro&uri=PERCENT-ENCODED-URL`, where `PERCENT-ENCODED-URL` is the database file's complete http(s) URL passed through [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding). (The URL may include its own query string with percent-encoded content, as long as the whole thing is itself percent-encoded.)
+With the [extension loaded](https://sqlite.org/loadext.html), use the normal SQLite3 API to open the special URI: 
+
+```
+file:/__web__?vfs=web&mode=ro&uri=PERCENT-ENCODED-URL
+```
+
+where `PERCENT-ENCODED-URL` is the database file's complete http(s) URL passed through [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding) (including any percent-encoded query string of its own). The URL server must support HEAD and [GET range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests) requests.
 
 SQLite reads from a database file in small pages (default 4 KiB), which would be very inefficient to serve with HTTP requests 1:1. Instead, the extension uses heuristics to consolidate page reads into larger HTTP requests, and "read ahead" with concurrent requests. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes. It doesn't work so well for big multi-way joins or other aggressively random access patterns; in those cases, it's better to download the database file upfront.
 

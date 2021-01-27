@@ -198,6 +198,7 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
             job.shutdown = true;
             fast_queue_.enqueue(job);
             worker_thread_->join();
+            worker_thread_.reset();
         }
         ThreadPool::Barrier();
     }
