@@ -210,8 +210,13 @@ class File : public SQLiteVFS::File {
         std::unique_lock<std::mutex> lock(self->mu_);
 
         // dequeue a desired extent
+        if (self->fetch_queue_.empty()) {
+            assert(self->fetch_queue2_.empty());
+            return nullptr;
+        }
         Extent extent = self->fetch_queue_.front();
         self->fetch_queue_.pop_front();
+        assert(self->fetch_queue2_.find(extent) != self->fetch_queue2_.end());
         self->fetch_queue2_.erase(extent);
 
         // coalesce request if same extent or one containing it is already wip or done
@@ -414,6 +419,12 @@ class File : public SQLiteVFS::File {
     }
 
     int Close() override {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            fetch_queue_.clear();
+            fetch_queue2_.clear();
+        }
+        threadpool_.Barrier();
         if (log_level_ > 2) {
             cerr << "[" << filename_ << "] page reads: " << read_count_
                  << ", HTTP GETs: " << fetch_count_
@@ -458,7 +469,6 @@ class File : public SQLiteVFS::File {
           log_level_(log_level), threadpool_(4, 4) {
         methods_.iVersion = 1;
     }
-    virtual ~File() { threadpool_.Barrier(); }
 };
 
 class VFS : public SQLiteVFS::Wrapper {
