@@ -1,5 +1,4 @@
 /** Wrappers for libcurl HTTP operations.
- *  Program must curl_global_init(CURL_GLOBAL_ALL) before using this
  */
 #pragma once
 
@@ -17,7 +16,80 @@
 #include <string>
 #include <unistd.h>
 
+// lazycurl: because libcurl.{so,dylib} has a large dependency tree, here's a mechanism to avoid
+// linking it at build time, instead using dlopen() and dlsym() so that the program can defer
+// loading it until necessary -- by invoking HTTP::global_init().
+// Similar overrides may be needed for libcurl API functions we need to use.
+#ifdef HTTP_LAZYCURL
+#include <dlfcn.h>
+extern "C" {
+struct curl_api {
+    CURL *(*easy_init)();
+    void (*easy_cleanup)(CURL *);
+    CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...);
+    CURLcode (*easy_setopt)(CURL *, CURLoption, ...);
+    CURLcode (*easy_perform)(CURL *);
+    char *(*easy_escape)(CURL *, const char *, int);
+    char *(*easy_unescape)(CURL *, const char *, int, int *);
+    const char *(*easy_strerror)(int);
+    curl_slist *(*slist_append)(curl_slist *, const char *);
+    void (*slist_free_all)(curl_slist *);
+    void (*free)(void *);
+};
+}
+static curl_api __lazycurl;
+#define curl_easy_init __lazycurl.easy_init
+#define curl_easy_cleanup __lazycurl.easy_cleanup
+#define curl_easy_getinfo __lazycurl.easy_getinfo
+#define curl_easy_setopt __lazycurl.easy_setopt
+#define curl_easy_perform __lazycurl.easy_perform
+#define curl_easy_escape __lazycurl.easy_escape
+#define curl_easy_unescape __lazycurl.easy_unescape
+#define curl_easy_strerror __lazycurl.easy_strerror
+#define curl_slist_append __lazycurl.slist_append
+#define curl_slist_free_all __lazycurl.slist_free_all
+#define curl_free __lazycurl.free
+#endif
+
 namespace HTTP {
+
+#ifndef HTTP_LAZYCURL
+CURLcode global_init() { return curl_global_init(CURL_GLOBAL_ALL); }
+#else
+CURLcode global_init() {
+#if defined(__APPLE__)
+    static const char *libname = "libcurl.dylib";
+#else
+    static const char *libname = "libcurl.so";
+#endif
+    static void *hlib = nullptr;
+    if (hlib) {
+        return CURLE_OK;
+    }
+    if (!(hlib = dlopen(libname, RTLD_NOW | RTLD_GLOBAL))) {
+        return CURLE_FAILED_INIT;
+    }
+    if ((__lazycurl.easy_init = (CURL(*(*)()))dlsym(hlib, "curl_easy_init")) &&
+        (__lazycurl.easy_cleanup = (void (*)(CURL *))dlsym(hlib, "curl_easy_cleanup")) &&
+        (__lazycurl.easy_getinfo =
+             (CURLcode(*)(CURL *, CURLINFO, ...))dlsym(hlib, "curl_easy_getinfo")) &&
+        (__lazycurl.easy_setopt =
+             (CURLcode(*)(CURL *, CURLoption, ...))dlsym(hlib, "curl_easy_setopt")) &&
+        (__lazycurl.easy_perform = (CURLcode(*)(CURL *))dlsym(hlib, "curl_easy_perform")) &&
+        (__lazycurl.easy_escape =
+             (char(*(*)(CURL *, const char *, int)))dlsym(hlib, "curl_easy_escape")) &&
+        (__lazycurl.easy_unescape =
+             (char(*(*)(CURL *, const char *, int, int *)))dlsym(hlib, "curl_easy_unescape")) &&
+        (__lazycurl.easy_strerror = (const char(*(*)(int)))dlsym(hlib, "curl_easy_strerror")) &&
+        (__lazycurl.slist_append =
+             (curl_slist(*(*)(curl_slist *, const char *)))dlsym(hlib, "curl_slist_append")) &&
+        (__lazycurl.slist_free_all = (void (*)(curl_slist *))dlsym(hlib, "curl_slist_free_all")) &&
+        (__lazycurl.free = (void (*)(void *))dlsym(hlib, "curl_free"))) {
+        return CURLE_OK;
+    }
+    return CURLE_NOT_BUILT_IN;
+}
+#endif
 
 // Helper class to scope a CURL handle
 class CURLconn {

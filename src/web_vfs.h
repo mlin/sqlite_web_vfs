@@ -317,10 +317,9 @@ class File : public SQLiteVFS::File {
         // find a resident extent containing desired page
         UpdateResident(lock);
         auto line = FindResidentExtent(offset, length);
-        bool stall = false;
+        bool blocked = false;
         if (line == resident_.end()) {
             // front-enqueue job to fetch the extent
-            Timer t_stall;
             Extent extent = Extent::Containing(offset, length);
             // if we already have an adjacent extent (at any size), promote to next size up
             if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
@@ -346,8 +345,7 @@ class File : public SQLiteVFS::File {
                 fetch_cv_.wait(lock);
                 UpdateResident(lock);
             } while ((line = FindResidentExtent(offset, length)) == resident_.end());
-            stalled_micros_ += t_stall.micros();
-            stall = true;
+            blocked = true;
         } else {
             // upon finding the desired page in an already-resident extent, decide whether to
             // initiate background prefetch for other, nearby extents
@@ -402,7 +400,7 @@ class File : public SQLiteVFS::File {
         usage_.erase(line->second.seqno); // old seqno
         usage_[++extent_seqno_] = line->first;
         line->second.seqno = extent_seqno_;
-        if (!stall && !line->second.used) {
+        if (!blocked && !line->second.used) {
             ideal_prefetch_count_++;
         }
         line->second.used = true;
@@ -415,6 +413,7 @@ class File : public SQLiteVFS::File {
     }
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
+        Timer t;
         if (iAmt < 0 || iOfst < 0) {
             return SQLITE_IOERR_READ;
         }
@@ -425,6 +424,7 @@ class File : public SQLiteVFS::File {
             memcpy(zBuf, resext.data->c_str() + (iOfst - resext.extent.Offset()), iAmt);
             read_count_++;
             read_bytes_ += iAmt;
+            stalled_micros_ += t.micros();
             return SQLITE_OK;
         } catch (int rc) {
             return rc != SQLITE_OK ? rc : SQLITE_IOERR_READ;
@@ -499,6 +499,7 @@ class VFS : public SQLiteVFS::Wrapper {
         if (!zName || strcmp(zName, "/__web__")) {
             return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
         }
+
         const char *encoded_uri = sqlite3_uri_parameter(zName, "web_url");
         if (!encoded_uri || !encoded_uri[0]) {
             last_error_ = "set web_url query parameter to percent-encoded URI";
@@ -518,6 +519,20 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
 
+        int rc = HTTP::global_init();
+        if (rc != CURLE_OK) {
+            if (rc == CURLE_NOT_BUILT_IN) {
+                last_error_ =
+                    "[web_vfs] failed to load required symbols from libcurl; try upgrading libcurl";
+            } else {
+                last_error_ = "[web_vfs] failed to load libcurl";
+            }
+            if (log_level) {
+                cerr << last_error_ << endl;
+            }
+            return SQLITE_ERROR;
+        }
+
         // get desired URI
         try {
             std::string uri;
@@ -532,7 +547,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
             long long file_size = sqlite3_uri_int64(zName, "web_content_length", -1);
             if (file_size <= 0) {
-                int rc = DetectFileSize(uri, curlpool.get(), log_level, file_size);
+                rc = DetectFileSize(uri, curlpool.get(), log_level, file_size);
                 if (rc != SQLITE_OK) {
                     return rc;
                 }
