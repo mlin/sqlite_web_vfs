@@ -584,7 +584,6 @@ class VFS : public SQLiteVFS::Wrapper {
             auto webfile =
                 new File(uri, FileNameForLog(uri), file_size, std::move(curlpool), log_level);
             webfile->InitHandle(pFile);
-            // initiate prefetch of first 64KiB
             *pOutFlags = flags;
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
@@ -627,6 +626,13 @@ class VFS : public SQLiteVFS::Wrapper {
                           filename = FileNameForLog(uri);
         HTTP::headers reqhdrs, reshdrs;
         reqhdrs["range"] = "bytes=0-0";
+
+        if (log_level > 2) {
+            cerr << "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ..."
+                 << endl
+                 << flush;
+        }
+
         long status = -1;
         HTTP::RetryOptions options;
         options.connpool = connpool;
