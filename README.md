@@ -12,6 +12,26 @@ where `{{PERCENT_ENCODED_URL}}` is the database file's complete http(s) URL pass
 
 **USE AT YOUR OWN RISK:** This project is not associated with the SQLite developers.
 
+### Quick example
+
+A Python program to access the [Chinook sample database](https://github.com/lerocha/chinook-database) on GitHub directly:
+
+```python3
+import sqlite3
+import urllib.parse
+
+CHINOOK_URL = "https://github.com/lerocha/chinook-database/raw/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite"
+
+con = sqlite3.connect(":memory:")  # just to load_extension
+con.load_extension("web_vfs")      # web_vfs.{so,dylib} in current directory
+con = sqlite3.connect(
+    f"file:/__web__?vfs=web&mode=ro&immutable=1&web_url={urllib.parse.quote(CHINOOK_URL)}",
+    uri=True,
+)
+schema = list(con.execute("select type, name from sqlite_master"))
+print(schema)
+```
+
 ### Build from source
 
 ![CI](https://github.com/mlin/sqlite_web_vfs/workflows/CI/badge.svg?branch=main)

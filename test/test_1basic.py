@@ -26,8 +26,7 @@ def test_chinook():
         "Track": 3503,
     }
 
-    con = sqlite3.connect(f":memory:")
-    con.enable_load_extension(True)
+    con = sqlite3.connect(":memory:")
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
     con = sqlite3.connect(
