@@ -128,7 +128,8 @@ class File : public SQLiteVFS::File {
     std::condition_variable fetch_cv_;           // on add to fetch_done_ or fetch_error_
 
     // performance counters
-    uint64_t read_count_ = 0, fetch_count_ = 0, read_bytes_ = 0, fetch_bytes_ = 0;
+    uint64_t read_count_ = 0, fetch_count_ = 0, ideal_prefetch_count_ = 0,
+             wasted_prefetch_count_ = 0, read_bytes_ = 0, fetch_bytes_ = 0, stalled_micros_ = 0;
 
     // run HTTP GET request for an extent
     int FetchExtent(Extent extent, shared_string &data) {
@@ -290,6 +291,20 @@ class File : public SQLiteVFS::File {
         return p != resident_.end() && p->second.used;
     }
 
+    void EvictResident(std::unique_lock<std::mutex> &lock, size_t n) {
+        assert(lock.owns_lock());
+        while (resident_.size() > n) {
+            auto lru = usage_.begin();
+            auto lru_line = resident_.find(lru->second);
+            assert(lru_line != resident_.end());
+            if (!lru_line->second.used) {
+                wasted_prefetch_count_++;
+            }
+            resident_.erase(lru_line);
+            usage_.erase(lru->first);
+        }
+    }
+
     ResidentExtent EnsureResidentExtent(uint64_t offset, size_t length) {
         auto last_used = usage_.rbegin();
         if (last_used != usage_.rend() && last_used->second.Contains(offset, length)) {
@@ -302,8 +317,10 @@ class File : public SQLiteVFS::File {
         // find a resident extent containing desired page
         UpdateResident(lock);
         auto line = FindResidentExtent(offset, length);
+        bool stall = false;
         if (line == resident_.end()) {
             // front-enqueue job to fetch the extent
+            Timer t_stall;
             Extent extent = Extent::Containing(offset, length);
             // if we already have an adjacent extent (at any size), promote to next size up
             if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
@@ -329,6 +346,8 @@ class File : public SQLiteVFS::File {
                 fetch_cv_.wait(lock);
                 UpdateResident(lock);
             } while ((line = FindResidentExtent(offset, length)) == resident_.end());
+            stalled_micros_ += t_stall.micros();
+            stall = true;
         } else {
             // upon finding the desired page in an already-resident extent, decide whether to
             // initiate background prefetch for other, nearby extents
@@ -383,16 +402,14 @@ class File : public SQLiteVFS::File {
         usage_.erase(line->second.seqno); // old seqno
         usage_[++extent_seqno_] = line->first;
         line->second.seqno = extent_seqno_;
+        if (!stall && !line->second.used) {
+            ideal_prefetch_count_++;
+        }
         line->second.used = true;
 
         // evict LRU extents if needed; this comes last to ensure we won't evict the extent we
         // just decided to use!
-        while (resident_.size() > 40) {
-            auto lru = usage_.begin();
-            assert(lru->second < line->first || line->first < lru->second);
-            resident_.erase(resident_.find(lru->second));
-            usage_.erase(lru->first);
-        }
+        EvictResident(lock, 32);
 
         return line->second;
     }
@@ -417,17 +434,22 @@ class File : public SQLiteVFS::File {
     }
 
     int Close() override {
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            fetch_queue_.clear();
-            fetch_queue2_.clear();
-        }
+        std::unique_lock<std::mutex> lock(mu_);
+        fetch_queue_.clear();
+        fetch_queue2_.clear();
+        lock.unlock();
         threadpool_.Barrier();
+        lock.lock();
+        UpdateResident(lock);
+        EvictResident(lock, 0); // ensure we count wasted prefetches
         if (log_level_ > 2) {
             cerr << "[" << filename_ << "] page reads: " << read_count_
                  << ", HTTP GETs: " << fetch_count_
-                 << ", bytes read / downloaded / filesize: " << read_bytes_ << " / " << fetch_bytes_
-                 << " / " << file_size_ << endl
+                 << " (prefetches ideal: " << ideal_prefetch_count_
+                 << ", wasted: " << wasted_prefetch_count_
+                 << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
+                 << fetch_bytes_ << " / " << file_size_ << ", stalled for "
+                 << (stalled_micros_ / 1000) << "ms" << endl
                  << std::flush;
         }
         return SQLiteVFS::File::Close();

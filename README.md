@@ -57,7 +57,7 @@ SQLite reads one small page at a time (default 4 KiB), which would be inefficien
 
 It's a good idea to [VACUUM](https://sqlite.org/lang_vacuum.html) a database file before serving it over the web, and to increase the reader's [page cache size](https://www.sqlite.org/pragma.html#pragma_cache_size).
 
-Reading large database files, budget ~1GiB RAM for the extension's prefetch buffers.
+Reading large database files, budget ~640 MiB RAM for the extension's prefetch buffers (which ought to be enough for anybody).
 
 ### Logging
 
