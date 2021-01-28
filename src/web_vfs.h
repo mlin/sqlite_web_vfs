@@ -176,7 +176,19 @@ class File : public SQLiteVFS::File {
                          << flush;
                 }
             };
+            if (log_level_ > 3) {
+                std::lock_guard<std::mutex> lock(mu_);
+                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"] << " @"
+                     << __LINE__ << endl
+                     << flush;
+            }
             auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, *body, options);
+            if (log_level_ > 3) {
+                std::lock_guard<std::mutex> lock(mu_);
+                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"] << " @"
+                     << __LINE__ << endl
+                     << flush;
+            }
             if (rc != CURLE_OK) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
@@ -545,7 +557,7 @@ class VFS : public SQLiteVFS::Wrapper {
         }
 
         if (log_level > 2) {
-            cerr << "Load & init libcurl ..." << endl << flush;
+            cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
         }
         int rc = HTTP::global_init();
         if (rc != CURLE_OK) {
@@ -561,7 +573,7 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_ERROR;
         }
         if (log_level > 2) {
-            cerr << "Load & init libcurl OK" << endl << flush;
+            cerr << "[web_vfs] Load & init libcurl OK" << endl << flush;
         }
 
         // get desired URI
