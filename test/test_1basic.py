@@ -27,6 +27,7 @@ def test_chinook():
     }
 
     con = sqlite3.connect(":memory:")
+    con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
     con = sqlite3.connect(

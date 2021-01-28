@@ -23,6 +23,7 @@ import urllib.parse
 CHINOOK_URL = "https://github.com/lerocha/chinook-database/raw/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite"
 
 con = sqlite3.connect(":memory:")  # just to load_extension
+con.enable_load_extension(True)
 con.load_extension("web_vfs")      # web_vfs.{so,dylib} in current directory
 con = sqlite3.connect(
     f"file:/__web__?vfs=web&mode=ro&immutable=1&web_url={urllib.parse.quote(CHINOOK_URL)}",
