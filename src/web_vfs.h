@@ -544,6 +544,9 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
 
+        if (log_level > 2) {
+            cerr << "Load & init libcurl ..." << endl << flush;
+        }
         int rc = HTTP::global_init();
         if (rc != CURLE_OK) {
             if (rc == CURLE_NOT_BUILT_IN) {
@@ -556,6 +559,9 @@ class VFS : public SQLiteVFS::Wrapper {
                 cerr << last_error_ << endl << flush;
             }
             return SQLITE_ERROR;
+        }
+        if (log_level > 2) {
+            cerr << "Load & init libcurl OK" << endl << flush;
         }
 
         // get desired URI
