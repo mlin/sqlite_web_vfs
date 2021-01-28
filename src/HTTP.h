@@ -23,7 +23,7 @@
 #ifdef HTTP_LAZYCURL
 #include <dlfcn.h>
 extern "C" {
-struct curl_api {
+struct lazycurl_api {
     CURL *(*easy_init)();
     void (*easy_cleanup)(CURL *);
     CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...);
@@ -37,7 +37,7 @@ struct curl_api {
     void (*free)(void *);
 };
 }
-static curl_api __lazycurl;
+static lazycurl_api __lazycurl;
 #define curl_easy_init __lazycurl.easy_init
 #define curl_easy_cleanup __lazycurl.easy_cleanup
 #define curl_easy_getinfo __lazycurl.easy_getinfo
