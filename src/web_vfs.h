@@ -9,6 +9,7 @@ namespace WebVFS {
 
 using std::cerr;
 using std::endl;
+using std::flush;
 
 class Timer {
     unsigned long long t0_;
@@ -157,7 +158,7 @@ class File : public SQLiteVFS::File {
                     std::lock_guard<std::mutex> lock(mu_);
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << ' ' << curl_easy_strerror(rc) << endl
-                         << std::flush;
+                         << flush;
                 }
                 return SQLITE_IOERR_READ;
             }
@@ -166,7 +167,7 @@ class File : public SQLiteVFS::File {
                     std::lock_guard<std::mutex> lock(mu_);
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << " error status = " << status << endl
-                         << std::flush;
+                         << flush;
                 }
                 return SQLITE_IOERR_READ;
             }
@@ -176,7 +177,7 @@ class File : public SQLiteVFS::File {
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << " incorrect response body length = " << body->size()
                          << ", expected = " << extent.Bytes() << endl
-                         << std::flush;
+                         << flush;
                 }
                 return SQLITE_IOERR_SHORT_READ;
             }
@@ -185,12 +186,12 @@ class File : public SQLiteVFS::File {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " OK (" << (t.micros() / 1000) << "ms)" << endl
-                     << std::flush;
+                     << flush;
             } else if (log_level_ && retried) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " OK after retry (" << (t.micros() / 1000) << "ms)" << endl
-                     << std::flush;
+                     << flush;
             }
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
@@ -199,7 +200,7 @@ class File : public SQLiteVFS::File {
             if (log_level_) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET: " << exn.what() << endl
-                     << std::flush;
+                     << flush;
             }
             return SQLITE_IOERR_READ;
         }
@@ -450,7 +451,7 @@ class File : public SQLiteVFS::File {
                  << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
                  << fetch_bytes_ << " / " << file_size_ << ", stalled for "
                  << (stalled_micros_ / 1000) << "ms" << endl
-                 << std::flush;
+                 << flush;
         }
         return SQLiteVFS::File::Close();
     }
@@ -528,7 +529,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 last_error_ = "[web_vfs] failed to load libcurl";
             }
             if (log_level) {
-                cerr << last_error_ << endl;
+                cerr << last_error_ << endl << flush;
             }
             return SQLITE_ERROR;
         }
@@ -611,7 +612,7 @@ class VFS : public SQLiteVFS::Wrapper {
             last_error_ = "[" + filename + "] " + protocol + " file size detection: ";
             last_error_ += curl_easy_strerror(rc);
             if (log_level) {
-                cerr << last_error_ << endl;
+                cerr << last_error_ << endl << flush;
             }
             return SQLITE_IOERR_READ;
         }
@@ -619,7 +620,7 @@ class VFS : public SQLiteVFS::Wrapper {
             last_error_ = "[" + filename + "] " + protocol +
                           " file size detection: error status = " + std::to_string(status);
             if (log_level) {
-                cerr << last_error_ << endl;
+                cerr << last_error_ << endl << flush;
             }
             return SQLITE_CANTOPEN;
         }
@@ -648,13 +649,14 @@ class VFS : public SQLiteVFS::Wrapper {
                           " GET bytes=0-0: response lacking valid content-range header "
                           "specifying file size";
             if (log_level) {
-                cerr << last_error_ << endl;
+                cerr << last_error_ << endl << flush;
             }
             return SQLITE_IOERR_READ;
         }
         if (log_level > 1) {
             cerr << "[" << filename << "] " << protocol << " file size detected: " << file_size
-                 << " (" << (t.micros() / 1000) << "ms)" << endl;
+                 << " (" << (t.micros() / 1000) << "ms)" << endl
+                 << flush;
         }
         ans = file_size;
         return SQLITE_OK;
