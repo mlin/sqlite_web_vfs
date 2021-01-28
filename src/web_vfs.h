@@ -176,19 +176,7 @@ class File : public SQLiteVFS::File {
                          << flush;
                 }
             };
-            if (log_level_ > 3) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"] << " @"
-                     << __LINE__ << endl
-                     << flush;
-            }
             auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, *body, options);
-            if (log_level_ > 3) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"] << " @"
-                     << __LINE__ << endl
-                     << flush;
-            }
             if (rc != CURLE_OK) {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);

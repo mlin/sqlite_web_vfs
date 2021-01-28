@@ -313,7 +313,9 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);
     CURLsetopt(*conn, CURLOPT_MAXREDIRS, 4);
 
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     CURLcall(curl_easy_perform(*conn));
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
 
     CURLcall(curl_easy_getinfo(*conn, CURLINFO_RESPONSE_CODE, &response_code));
 
