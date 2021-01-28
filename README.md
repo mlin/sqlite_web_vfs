@@ -41,7 +41,7 @@ Requirements:
 
 * Linux or macOS
 * C++11 build system with CMake
-* Dev packages for SQLite3 and libcurl
+* SQLite3 and libcurl dev packages
 * (Tests only) python3 and pytest
 
 ```
