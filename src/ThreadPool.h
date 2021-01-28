@@ -129,7 +129,7 @@ class ThreadPool {
     }
 
     // Await completion of all previously enqueued jobs
-    void Barrier() {
+    virtual void Barrier() {
         if (seqno_next_) {
             std::unique_lock<std::mutex> lock(mutex_);
             while (seqno_done_ < seqno_next_) {
@@ -190,5 +190,16 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
         if (!worker_thread_) {
             worker_thread_.reset(new std::thread([this]() { this->EnqueueFastWorker(); }));
         }
+    }
+
+    void Barrier() override {
+        if (worker_thread_) {
+            EnqueueFastJob job;
+            job.shutdown = true;
+            fast_queue_.enqueue(job);
+            worker_thread_->join();
+            worker_thread_.reset();
+        }
+        ThreadPool::Barrier();
     }
 };
