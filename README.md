@@ -5,12 +5,12 @@ This [SQLite3 virtual filesystem extension](https://www.sqlite.org/vfs.html) pro
 With the [extension loaded](https://sqlite.org/loadext.html), use the normal SQLite3 API to open the special URI: 
 
 ```
-file:/__web__?mode=ro&vfs=web&web_url={{PERCENT_ENCODED_URL}}
+file:/__web__?mode=ro&immutable=1&vfs=web&web_url={{PERCENT_ENCODED_URL}}
 ```
 
-where `{{PERCENT_ENCODED_URL}}` is the database file's complete http(s) URL passed through [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding) (including any percent-encoded query string of its own). The URL server must support [GET range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests) requests, and the content must not change during the session.
+where `{{PERCENT_ENCODED_URL}}` is the database file's complete http(s) URL passed through [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding) (doubly encoding its own query string, if any). The URL server must support [GET range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests) requests, and the content must be immutable for the session.
 
-SQLite reads from a database file in small pages (default 4 KiB), which would be inefficient to serve with one-to-one HTTP requests. Instead, the extension heuristically consolidates page reads into larger HTTP requests, and concurrently reads ahead on background threads. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes (and a modest number thereof). It doesn't work so well for big multi-way joins and other aggressively random access patterns; in those cases, it's better to download the database file upfront to open locally.
+SQLite reads one small page at a time (default 4 KiB), which would be inefficient to serve with HTTP requests one-to-one. Instead, the extension adaptively consolidates page fetching into larger HTTP requests, and concurrently reads ahead on background threads. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes (and a modest number thereof). It's less suitable for big multi-way joins and other aggressively random access patterns; in those cases, it's better to download the database file upfront to open locally.
 
 It's a good idea to [VACUUM](https://sqlite.org/lang_vacuum.html) a database file before serving it over the web, and to increase the reader's [page cache size](https://www.sqlite.org/pragma.html#pragma_cache_size).
 

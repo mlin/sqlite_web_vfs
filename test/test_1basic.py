@@ -31,7 +31,8 @@ def test_chinook():
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
     con = sqlite3.connect(
-        f"file:/__web__?vfs=web&mode=ro&web_url={urllib.parse.quote(CHINOOK_URI)}", uri=True
+        f"file:/__web__?vfs=web&mode=ro&immutable=1&web_url={urllib.parse.quote(CHINOOK_URI)}",
+        uri=True,
     )
     schema = list(con.execute("select type, name from sqlite_master"))
     print(schema)
@@ -68,7 +69,7 @@ def test_tpch():
     con.executescript("PRAGMA cache_size = -2100000")
 
     con = sqlite3.connect(
-        f"file:/__web__?vfs=web&mode=ro&web_url={urllib.parse.quote(TPCH_URI)}",
+        f"file:/__web__?mode=ro&immutable=1&vfs=web&web_url={urllib.parse.quote(TPCH_URI)}",
         uri=True,
     )
     schema = list(con.execute("select type, name from sqlite_master"))
