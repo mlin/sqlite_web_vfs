@@ -479,9 +479,9 @@ class VFS : public SQLiteVFS::Wrapper {
         if (!zName || strcmp(zName, "/__web__")) {
             return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
         }
-        const char *encoded_uri = sqlite3_uri_parameter(zName, "web_uri");
+        const char *encoded_uri = sqlite3_uri_parameter(zName, "web_url");
         if (!encoded_uri || !encoded_uri[0]) {
-            last_error_ = "set web_uri query parameter to URI-encoded URI";
+            last_error_ = "set web_url query parameter to percent-encoded URI";
             return SQLITE_CANTOPEN;
         }
         if (!(flags & SQLITE_OPEN_READONLY)) {
@@ -504,58 +504,24 @@ class VFS : public SQLiteVFS::Wrapper {
             curlpool.reset(new HTTP::CURLpool(4));
             auto conn = curlpool->checkout();
             if (!conn->unescape(encoded_uri, uri)) {
-                last_error_ = "Failed URI-decoding web_uri";
+                last_error_ = "Failed percent-decoding web_url";
                 return SQLITE_CANTOPEN;
             }
             curlpool->checkin(conn);
-            std::string filename = FileNameForLog(uri);
-            const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP";
-            Timer t;
 
             long long file_size = sqlite3_uri_int64(zName, "web_content_length", -1);
             if (file_size <= 0) {
-                // HEAD request to determine the database file's existence & size
-                HTTP::headers reqhdrs, reshdrs;
-                long status = -1;
-                HTTP::RetryOptions options;
-                options.connpool = curlpool.get();
-                CURLcode rc = HTTP::RetryHead(uri, reqhdrs, status, reshdrs, options);
-                if (rc != CURLE_OK) {
-                    last_error_ = protocol + " HEAD " + filename + ": ";
-                    last_error_ += curl_easy_strerror(rc);
-                    if (log_level) {
-                        cerr << last_error_ << endl;
-                    }
-                    return SQLITE_IOERR_READ;
+                int rc = DetectFileSize(uri, curlpool.get(), log_level, file_size);
+                if (rc != SQLITE_OK) {
+                    return rc;
                 }
-                if (status < 200 || status >= 300) {
-                    last_error_ = protocol + " HEAD " + filename +
-                                  ": error status = " + std::to_string(status);
-                    if (log_level) {
-                        cerr << last_error_ << endl;
-                    }
-                    return SQLITE_CANTOPEN;
-                }
-
-                // parse content-length
-                file_size = HTTP::ReadContentLengthHeader(reshdrs);
-                if (file_size < 0) {
-                    last_error_ = protocol + " HEAD " + filename +
-                                  ":response lacking valid content-length header";
-                    if (log_level) {
-                        cerr << last_error_ << endl;
-                    }
-                    return SQLITE_IOERR_READ;
-                }
-                if (log_level > 1) {
-                    cerr << protocol << " HEAD " << filename << " content-length: " << file_size
-                         << " (" << (t.micros() / 1000) << "ms)" << endl;
-                }
+                assert(file_size >= 0);
             }
 
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
-            auto webfile = new File(uri, filename, file_size, std::move(curlpool), log_level);
+            auto webfile =
+                new File(uri, FileNameForLog(uri), file_size, std::move(curlpool), log_level);
             webfile->InitHandle(pFile);
             // initiate prefetch of first 64KiB
             *pOutFlags = flags;
@@ -588,6 +554,74 @@ class VFS : public SQLiteVFS::Wrapper {
             ans = ans.substr(0, 97) + "...";
         }
         return ans;
+    }
+
+    int DetectFileSize(const std::string &uri, HTTP::CURLpool *connpool, unsigned long log_level,
+                       long long &ans) {
+        // GET range: bytes=0-0 to determine the database file's existence & size.
+        // This is instead of HEAD for compatibility with "presigned" URLs that can only
+        // be used for GET.
+        Timer t;
+        const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP",
+                          filename = FileNameForLog(uri);
+        HTTP::headers reqhdrs, reshdrs;
+        reqhdrs["range"] = "bytes=0-0";
+        long status = -1;
+        HTTP::RetryOptions options;
+        options.connpool = connpool;
+        std::string empty;
+        CURLcode rc = HTTP::RetryGet(uri, reqhdrs, status, reshdrs, empty, options);
+        if (rc != CURLE_OK) {
+            last_error_ = "[" + filename + "] " + protocol + " file size detection: ";
+            last_error_ += curl_easy_strerror(rc);
+            if (log_level) {
+                cerr << last_error_ << endl;
+            }
+            return SQLITE_IOERR_READ;
+        }
+        if (status < 200 || status >= 300) {
+            last_error_ = "[" + filename + "] " + protocol +
+                          " file size detection: error status = " + std::to_string(status);
+            if (log_level) {
+                cerr << last_error_ << endl;
+            }
+            return SQLITE_CANTOPEN;
+        }
+
+        // parse content-range
+        long long file_size = -1;
+        auto size_it = reshdrs.find("content-range");
+        if (size_it != reshdrs.end()) {
+            const std::string &cr = size_it->second;
+            if (cr.substr(0, 6) == "bytes ") {
+                auto slash = cr.find('/');
+                if (slash != std::string::npos) {
+                    std::string size_txt = cr.substr(slash + 1);
+                    const char *size_str = size_txt.c_str();
+                    char *endptr = nullptr;
+                    errno = 0;
+                    file_size = strtoll(size_str, &endptr, 10);
+                    if (errno || endptr != size_str + size_txt.size() || file_size < 0) {
+                        file_size = -1;
+                    }
+                }
+            }
+        }
+        if (file_size < 0) {
+            last_error_ = "[" + filename + "] " + protocol +
+                          " GET bytes=0-0: response lacking valid content-range header "
+                          "specifying file size";
+            if (log_level) {
+                cerr << last_error_ << endl;
+            }
+            return SQLITE_IOERR_READ;
+        }
+        if (log_level > 1) {
+            cerr << "[" << filename << "] " << protocol << " file size detected: " << file_size
+                 << " (" << (t.micros() / 1000) << "ms)" << endl;
+        }
+        ans = file_size;
+        return SQLITE_OK;
     }
 };
 
