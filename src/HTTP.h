@@ -40,7 +40,13 @@ struct lazycurl_api {
 static lazycurl_api __lazycurl;
 #define curl_easy_init __lazycurl.easy_init
 #define curl_easy_cleanup __lazycurl.easy_cleanup
+#ifdef curl_easy_getinfo
+#undef curl_easy_getinfo
+#endif
 #define curl_easy_getinfo __lazycurl.easy_getinfo
+#ifdef curl_easy_setopt
+#undef curl_easy_setopt
+#endif
 #define curl_easy_setopt __lazycurl.easy_setopt
 #define curl_easy_perform __lazycurl.easy_perform
 #define curl_easy_escape __lazycurl.easy_escape

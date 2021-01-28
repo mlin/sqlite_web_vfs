@@ -30,7 +30,7 @@ project(sqlite_web_vfs VERSION 1.0
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DHTTP_LAZYCURL")
+add_definitions(-DHTTP_LAZYCURL)
 
 add_library(web_vfs SHARED src/web_vfs.cc src/web_vfs.h src/SQLiteVFS.h src/ThreadPool.h src/HTTP.h)
 SET_TARGET_PROPERTIES(web_vfs PROPERTIES PREFIX "")
