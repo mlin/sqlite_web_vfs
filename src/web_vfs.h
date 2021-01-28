@@ -488,12 +488,13 @@ class VFS : public SQLiteVFS::Wrapper {
             last_error_ = "web access is read-only";
             return SQLITE_CANTOPEN;
         }
-        unsigned long log_level = 1;
+        unsigned long log_level = sqlite3_uri_int64(zName, "web_log", 1);
         const char *env_log = getenv("SQLITE_WEB_LOG");
         if (env_log && *env_log) {
-            log_level = strtoul(env_log, nullptr, 10);
-            if (log_level == ULONG_MAX) {
-                log_level = 1;
+            errno = 0;
+            unsigned long env_log_level = strtoul(env_log, nullptr, 10);
+            if (errno == 0 && env_log_level != ULONG_MAX) {
+                log_level = env_log_level;
             }
         }
 
