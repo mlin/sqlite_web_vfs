@@ -109,9 +109,7 @@ class CURLconn {
 
   public:
     CURLconn() : h_(nullptr) {
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         h_ = curl_easy_init();
-        std::cerr << __FILE__ << ":" << __LINE__ << " " << (uint64_t)h_ << std::endl << std::flush;
         if (!h_) {
             throw std::bad_alloc();
         }
@@ -162,9 +160,7 @@ class CURLpool {
         std::lock_guard<std::mutex> lock(mu_);
         std::unique_ptr<CURLconn> ans;
         if (pool_.empty()) {
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
             ans.reset(new CURLconn());
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         } else {
             ans.reset(pool_.front().release());
             pool_.pop();
@@ -288,7 +284,6 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
                  CURLpool *pool = nullptr) {
     CURLcode c;
 
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     std::unique_ptr<CURLconn> conn;
 
     if (pool) {
@@ -297,7 +292,6 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
         conn.reset(new CURLconn());
     }
 
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     CURLsetopt(*conn, CURLOPT_URL, url.c_str());
 
     switch (method) {
@@ -309,7 +303,6 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
         break;
     }
 
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     RequestHeadersHelper headers4curl(request_headers);
     CURLsetopt(*conn, CURLOPT_HTTPHEADER, ((curl_slist *)headers4curl));
 
@@ -323,9 +316,7 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);
     CURLsetopt(*conn, CURLOPT_MAXREDIRS, 4);
 
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     CURLcall(curl_easy_perform(*conn));
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
 
     CURLcall(curl_easy_getinfo(*conn, CURLINFO_RESPONSE_CODE, &response_code));
 
@@ -377,7 +368,6 @@ struct RetryOptions {
 CURLcode RetryRequest(Method method, const std::string &url, const headers &request_headers,
                       long &response_code, headers &response_headers, std::string &response_body,
                       const RetryOptions &options) {
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     useconds_t delay = options.initial_delay;
     std::ostringstream response_body_stream;
     CURLcode rc;
@@ -393,7 +383,6 @@ CURLcode RetryRequest(Method method, const std::string &url, const headers &requ
             delay *= options.backoff_factor;
         }
 
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         response_code = -1;
         response_headers.clear();
         response_body_stream.clear();
