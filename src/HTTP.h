@@ -64,9 +64,9 @@ CURLcode global_init() { return curl_global_init(CURL_GLOBAL_ALL); }
 #else
 CURLcode global_init() {
 #if defined(__APPLE__)
-    static const char *libname[] = {"libcurl.dylib", "libcurl.4.dylib"};
+    static const char *libname[] = {"libcurl.4.dylib", "libcurl.dylib"};
 #else
-    static const char *libname[] = {"libcurl.so", "libcurl.so.4"};
+    static const char *libname[] = {"libcurl.so.4", "libcurl.so"};
 #endif
     static void *hlib = nullptr;
     if (hlib) {
@@ -163,10 +163,8 @@ class CURLpool {
             ans.reset(new CURLconn());
             std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         } else {
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
             ans.reset(pool_.front().release());
             pool_.pop();
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         }
         return ans;
     }
@@ -291,18 +289,13 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     std::unique_ptr<CURLconn> conn;
 
     if (pool) {
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         conn = pool->checkout();
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     } else {
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         conn.reset(new CURLconn());
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     }
 
     std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     CURLsetopt(*conn, CURLOPT_URL, url.c_str());
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
 
     switch (method) {
     case Method::GET:
