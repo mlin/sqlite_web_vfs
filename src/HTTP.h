@@ -159,10 +159,14 @@ class CURLpool {
         std::lock_guard<std::mutex> lock(mu_);
         std::unique_ptr<CURLconn> ans;
         if (pool_.empty()) {
+            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
             ans.reset(new CURLconn());
+            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         } else {
+            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
             ans.reset(pool_.front().release());
             pool_.pop();
+            std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         }
         return ans;
     }
@@ -287,11 +291,16 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     std::unique_ptr<CURLconn> conn;
 
     if (pool) {
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         conn = pool->checkout();
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     } else {
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         conn.reset(new CURLconn());
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     }
 
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     CURLsetopt(*conn, CURLOPT_URL, url.c_str());
     std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
 
