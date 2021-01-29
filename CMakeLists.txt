@@ -30,11 +30,11 @@ project(sqlite_web_vfs VERSION 1.0
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-#add_definitions(-DHTTP_LAZYCURL)
+add_definitions(-DHTTP_LAZYCURL)
 
 add_library(web_vfs SHARED src/web_vfs.cc src/web_vfs.h src/SQLiteVFS.h src/ThreadPool.h src/HTTP.h)
 SET_TARGET_PROPERTIES(web_vfs PROPERTIES PREFIX "")
-target_link_libraries(web_vfs PRIVATE pthread dl curl)  # EXCLUDE curl given HTTP_LAZYCURL -- see src/HTTP.h
+target_link_libraries(web_vfs PRIVATE pthread dl)  # EXCLUDE curl given HTTP_LAZYCURL -- see src/HTTP.h
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     include(CTest)
