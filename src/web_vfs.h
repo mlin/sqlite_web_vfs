@@ -139,6 +139,12 @@ class File : public SQLiteVFS::File {
         try {
             HTTP::headers reqhdrs, reshdrs;
             reqhdrs["range"] = extent.str(file_size_);
+            if (log_level_ > 2) {
+                std::lock_guard<std::mutex> lock(mu_);
+                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
+                     << " ..." << endl
+                     << flush;
+            }
 
             long status = -1;
             bool retried = false;
@@ -147,11 +153,29 @@ class File : public SQLiteVFS::File {
             options.min_response_body =
                 std::min(uint64_t(extent.Bytes()), uint64_t(file_size_ - extent.Offset()));
             options.connpool = curlpool_.get();
-            options.on_retry = [&retried](HTTP::Method method, const std::string &url,
-                                          const HTTP::headers &request_headers, CURLcode rc,
-                                          long response_code, const HTTP::headers &response_headers,
-                                          const std::string &response_body,
-                                          unsigned int attempt) { retried = true; };
+            options.on_retry = [&](HTTP::Method method, const std::string &url,
+                                   const HTTP::headers &request_headers, CURLcode rc,
+                                   long response_code, const HTTP::headers &response_headers,
+                                   const std::string &response_body, unsigned int attempt) {
+                retried = true;
+                if (log_level_ > 1) {
+                    std::string msg = curl_easy_strerror(rc);
+                    if (rc == CURLE_OK) {
+                        if (response_code < 200 || response_code >= 300) {
+                            msg = "status = " + std::to_string(response_code);
+                        } else {
+                            msg = "unexpected response body size " +
+                                  std::to_string(response_body.size()) +
+                                  " != " + std::to_string(options.min_response_body);
+                        }
+                    }
+                    std::lock_guard<std::mutex> lock(mu_);
+                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
+                         << " retrying " << msg << " (attempt " << attempt << " of "
+                         << options.max_tries << ")" << endl
+                         << flush;
+                }
+            };
             auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, *body, options);
             if (rc != CURLE_OK) {
                 if (log_level_) {
@@ -520,6 +544,9 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
 
+        if (log_level > 2) {
+            cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
+        }
         int rc = HTTP::global_init();
         if (rc != CURLE_OK) {
             if (rc == CURLE_NOT_BUILT_IN) {
@@ -532,6 +559,9 @@ class VFS : public SQLiteVFS::Wrapper {
                 cerr << last_error_ << endl << flush;
             }
             return SQLITE_ERROR;
+        }
+        if (log_level > 2) {
+            cerr << "[web_vfs] Load & init libcurl OK" << endl << flush;
         }
 
         // get desired URI
@@ -560,7 +590,6 @@ class VFS : public SQLiteVFS::Wrapper {
             auto webfile =
                 new File(uri, FileNameForLog(uri), file_size, std::move(curlpool), log_level);
             webfile->InitHandle(pFile);
-            // initiate prefetch of first 64KiB
             *pOutFlags = flags;
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
@@ -603,6 +632,13 @@ class VFS : public SQLiteVFS::Wrapper {
                           filename = FileNameForLog(uri);
         HTTP::headers reqhdrs, reshdrs;
         reqhdrs["range"] = "bytes=0-0";
+
+        if (log_level > 2) {
+            cerr << "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ..."
+                 << endl
+                 << flush;
+        }
+
         long status = -1;
         HTTP::RetryOptions options;
         options.connpool = connpool;
