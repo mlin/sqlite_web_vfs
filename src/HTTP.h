@@ -106,7 +106,9 @@ class CURLconn {
 
   public:
     CURLconn() : h_(nullptr) {
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         h_ = curl_easy_init();
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << (uint64_t)h_ << std::endl << std::flush;
         if (!h_) {
             throw std::bad_alloc();
         }
