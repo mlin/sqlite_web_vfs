@@ -24,6 +24,7 @@
 #include <dlfcn.h>
 extern "C" {
 struct lazycurl_api {
+    CURLcode (*global_init)(long);
     CURL *(*easy_init)();
     void (*easy_cleanup)(CURL *);
     CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...);
@@ -38,6 +39,7 @@ struct lazycurl_api {
 };
 }
 static lazycurl_api __lazycurl;
+#define curl_global_init __lazycurl.global_init
 #define curl_easy_init __lazycurl.easy_init
 #define curl_easy_cleanup __lazycurl.easy_cleanup
 #ifdef curl_easy_getinfo
@@ -78,7 +80,8 @@ CURLcode global_init() {
     if (!hlib) {
         return CURLE_FAILED_INIT;
     }
-    if ((__lazycurl.easy_init = (CURL(*(*)()))dlsym(hlib, "curl_easy_init")) &&
+    if ((__lazycurl.global_init = (CURLcode(*)(long))dlsym(hlib, "curl_global_init")) &&
+        (__lazycurl.easy_init = (CURL(*(*)()))dlsym(hlib, "curl_easy_init")) &&
         (__lazycurl.easy_cleanup = (void (*)(CURL *))dlsym(hlib, "curl_easy_cleanup")) &&
         (__lazycurl.easy_getinfo =
              (CURLcode(*)(CURL *, CURLINFO, ...))dlsym(hlib, "curl_easy_getinfo")) &&
@@ -94,7 +97,7 @@ CURLcode global_init() {
              (curl_slist(*(*)(curl_slist *, const char *)))dlsym(hlib, "curl_slist_append")) &&
         (__lazycurl.slist_free_all = (void (*)(curl_slist *))dlsym(hlib, "curl_slist_free_all")) &&
         (__lazycurl.free = (void (*)(void *))dlsym(hlib, "curl_free"))) {
-        return CURLE_OK;
+        return __lazycurl.global_init(CURL_GLOBAL_ALL);
     }
     return CURLE_NOT_BUILT_IN;
 }
