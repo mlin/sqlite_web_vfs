@@ -281,6 +281,7 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
                  CURLpool *pool = nullptr) {
     CURLcode c;
 
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     std::unique_ptr<CURLconn> conn;
 
     if (pool) {
@@ -290,6 +291,7 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     }
 
     CURLsetopt(*conn, CURLOPT_URL, url.c_str());
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
 
     switch (method) {
     case Method::GET:
@@ -300,6 +302,7 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
         break;
     }
 
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     RequestHeadersHelper headers4curl(request_headers);
     CURLsetopt(*conn, CURLOPT_HTTPHEADER, ((curl_slist *)headers4curl));
 
@@ -367,6 +370,7 @@ struct RetryOptions {
 CURLcode RetryRequest(Method method, const std::string &url, const headers &request_headers,
                       long &response_code, headers &response_headers, std::string &response_body,
                       const RetryOptions &options) {
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
     useconds_t delay = options.initial_delay;
     std::ostringstream response_body_stream;
     CURLcode rc;
@@ -382,6 +386,7 @@ CURLcode RetryRequest(Method method, const std::string &url, const headers &requ
             delay *= options.backoff_factor;
         }
 
+        std::cerr << __FILE__ << ":" << __LINE__ << std::endl << std::flush;
         response_code = -1;
         response_headers.clear();
         response_body_stream.clear();
