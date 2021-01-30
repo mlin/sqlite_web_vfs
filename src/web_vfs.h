@@ -172,7 +172,8 @@ class File : public SQLiteVFS::File {
                     std::lock_guard<std::mutex> lock(mu_);
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                          << " retrying " << msg << " (attempt " << attempt << " of "
-                         << options.max_tries << ")" << endl
+                         << options.max_tries << "; " << (t.micros() / 1000) << "ms elapsed)"
+                         << endl
                          << flush;
                 }
             };
@@ -181,7 +182,8 @@ class File : public SQLiteVFS::File {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << ' ' << curl_easy_strerror(rc) << endl
+                         << ' ' << curl_easy_strerror(rc) << " (" << (t.micros() / 1000) << "ms)"
+                         << endl
                          << flush;
                 }
                 return SQLITE_IOERR_READ;
@@ -190,7 +192,8 @@ class File : public SQLiteVFS::File {
                 if (log_level_) {
                     std::lock_guard<std::mutex> lock(mu_);
                     cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << " error status = " << status << endl
+                         << " error status = " << status << " (" << (t.micros() / 1000) << "ms)"
+                         << endl
                          << flush;
                 }
                 return SQLITE_IOERR_READ;
