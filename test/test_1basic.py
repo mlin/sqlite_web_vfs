@@ -61,17 +61,16 @@ def test_chinook():
             assert ct == CHINOOK_COUNTS[tbl]
 
 
-def test_tpch():
+def test_tpch_q1():
     con = sqlite3.connect(f":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
-
-    con.executescript("PRAGMA cache_size = -2100000")
 
     con = sqlite3.connect(
         f"file:/__web__?mode=ro&immutable=1&vfs=web&web_url={urllib.parse.quote(TPCH_URI)}",
         uri=True,
     )
+    con.executescript("PRAGMA cache_size = -2100000")
     schema = list(con.execute("select type, name from sqlite_master"))
     print(schema)
 
@@ -91,6 +90,51 @@ def test_tpch():
             from lineitem
             where l_shipdate <= date('1998-12-01', '-90 day')
             group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;
+            """
+        )
+    )
+    print(results)
+    sys.stdout.flush()
+
+
+@pytest.mark.skipif("GITHUB_RUN_ID" not in os.environ, reason="run stressful Q8 on cloud only")
+def test_tpch_q8():
+    con = sqlite3.connect(f":memory:")
+    con.enable_load_extension(True)
+    con.load_extension(os.path.join(BUILD, "web_vfs"))
+
+    con = sqlite3.connect(
+        f"file:/__web__?mode=ro&immutable=1&vfs=web&web_url={urllib.parse.quote(TPCH_URI)}",
+        uri=True,
+    )
+
+    con.executescript("PRAGMA cache_size = -2100000")
+
+    results = list(
+        con.execute(
+            """
+            select
+                o_year,
+                sum(case when nation = 'BRAZIL' then volume else 0 end) / sum(volume) as mkt_share
+            from
+                (select
+                    strftime("%Y", o_orderdate) as o_year,
+                    l_extendedprice * (1-l_discount) as volume,
+                    n2.n_name as nation
+                from part, supplier, lineitem, orders, customer, nation n1, nation n2, region
+                where
+                    p_partkey = l_partkey
+                    and s_suppkey = l_suppkey
+                    and l_orderkey = o_orderkey
+                    and o_custkey = c_custkey
+                    and c_nationkey = n1.n_nationkey
+                    and n1.n_regionkey = r_regionkey
+                    and r_name = 'AMERICA'
+                    and s_nationkey = n2.n_nationkey
+                    and o_orderdate between date('1995-01-01') and date('1996-12-31')
+                    and p_type = 'ECONOMY ANODIZED STEEL')
+                as all_nations
+            group by o_year order by o_year;
             """
         )
     )

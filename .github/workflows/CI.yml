@@ -30,7 +30,7 @@ jobs:
     - name: docker build
       run: docker build -t sqlite_web_vfs_tests --build-arg build_type=${{ matrix.BUILD_TYPE }} .
     - name: run tests
-      run: docker run sqlite_web_vfs_tests
+      run: docker run -e GITHUB_RUN_ID=$GITHUB_RUN_ID sqlite_web_vfs_tests
 
   macOS:
     runs-on: macOS-10.15

@@ -397,6 +397,8 @@ CURLcode RetryRequest(Method method, const std::string &url, const headers &requ
                      response_body.size() == content_length)) {
                     return CURLE_OK;
                 }
+            } else if (response_code == 429) {
+                // TODO: honor Retry-After (within reason)
             } else if (response_code < 500 || response_code >= 600) {
                 return CURLE_OK;
             }
