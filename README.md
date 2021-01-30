@@ -61,4 +61,4 @@ Reading large database files, budget ~640 MiB RAM for the extension's prefetch b
 
 ### Logging
 
-By default, the extension reports errors on standard error (including HTTP errors that succeed after retry). This can be disabled by setting `&web_log=0` in the open URI, or by setting the environment variable `SQLITE_WEB_LOG=0`, the latter taking precedence. The log level can also be set to 2 or 3 to log every HTTP request made.
+The extension logs a message to standard error upon any fatally failed HTTP request, and requests that succeed after having to be retried. The latter can be suppressed by setting `&web_log=1` in the open URI, or by setting environment `SQLITE_WEB_LOG=1` in the environment. The log level can be set to 0 to suppress all standard error logging, or increased up to 5 for individual request/response logging.

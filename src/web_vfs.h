@@ -139,7 +139,7 @@ class File : public SQLiteVFS::File {
         try {
             HTTP::headers reqhdrs, reshdrs;
             reqhdrs["range"] = extent.str(file_size_);
-            if (log_level_ > 2) {
+            if (log_level_ > 4) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " ..." << endl
@@ -158,7 +158,7 @@ class File : public SQLiteVFS::File {
                                    long response_code, const HTTP::headers &response_headers,
                                    const std::string &response_body, unsigned int attempt) {
                 retried = true;
-                if (log_level_ > 1) {
+                if (log_level_ > 2) {
                     std::string msg = curl_easy_strerror(rc);
                     if (rc == CURLE_OK) {
                         if (response_code < 200 || response_code >= 300) {
@@ -206,12 +206,12 @@ class File : public SQLiteVFS::File {
                 return SQLITE_IOERR_SHORT_READ;
             }
             data = body;
-            if (log_level_ > 1) {
+            if (log_level_ > 3) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " OK (" << (t.micros() / 1000) << "ms)" << endl
                      << flush;
-            } else if (log_level_ && retried) {
+            } else if (log_level_ > 1 && retried) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
                      << " OK after retry (" << (t.micros() / 1000) << "ms)" << endl
@@ -462,12 +462,13 @@ class File : public SQLiteVFS::File {
         std::unique_lock<std::mutex> lock(mu_);
         fetch_queue_.clear();
         fetch_queue2_.clear();
+        // TODO: is it feasible to abort ongoing libcurl requests too?
         lock.unlock();
         threadpool_.Barrier();
         lock.lock();
         UpdateResident(lock);
         EvictResident(lock, 0); // ensure we count wasted prefetches
-        if (log_level_ > 2) {
+        if (log_level_ > 3) {
             cerr << "[" << filename_ << "] page reads: " << read_count_
                  << ", HTTP GETs: " << fetch_count_
                  << " (prefetches ideal: " << ideal_prefetch_count_
@@ -534,7 +535,7 @@ class VFS : public SQLiteVFS::Wrapper {
             last_error_ = "web access is read-only";
             return SQLITE_CANTOPEN;
         }
-        unsigned long log_level = sqlite3_uri_int64(zName, "web_log", 1);
+        unsigned long log_level = sqlite3_uri_int64(zName, "web_log", 2);
         const char *env_log = getenv("SQLITE_WEB_LOG");
         if (env_log && *env_log) {
             errno = 0;
@@ -544,7 +545,7 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
 
-        if (log_level > 2) {
+        if (log_level > 4) {
             cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
         }
         int rc = HTTP::global_init();
@@ -560,7 +561,7 @@ class VFS : public SQLiteVFS::Wrapper {
             }
             return SQLITE_ERROR;
         }
-        if (log_level > 2) {
+        if (log_level > 3) {
             cerr << "[web_vfs] Load & init libcurl OK" << endl << flush;
         }
 
@@ -633,7 +634,7 @@ class VFS : public SQLiteVFS::Wrapper {
         HTTP::headers reqhdrs, reshdrs;
         reqhdrs["range"] = "bytes=0-0";
 
-        if (log_level > 2) {
+        if (log_level > 4) {
             cerr << "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ..."
                  << endl
                  << flush;
@@ -665,6 +666,11 @@ class VFS : public SQLiteVFS::Wrapper {
         long long file_size = -1;
         auto size_it = reshdrs.find("content-range");
         if (size_it != reshdrs.end()) {
+            if (log_level > 4) {
+                cerr << "[" << filename << "] " << protocol << " content-range: " << size_it->second
+                     << endl
+                     << flush;
+            }
             const std::string &cr = size_it->second;
             if (cr.substr(0, 6) == "bytes ") {
                 auto slash = cr.find('/');
@@ -689,7 +695,7 @@ class VFS : public SQLiteVFS::Wrapper {
             }
             return SQLITE_IOERR_READ;
         }
-        if (log_level > 1) {
+        if (log_level > 3) {
             cerr << "[" << filename << "] " << protocol << " file size detected: " << file_size
                  << " (" << (t.micros() / 1000) << "ms)" << endl
                  << flush;
