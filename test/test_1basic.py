@@ -66,12 +66,11 @@ def test_tpch_q1():
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
-    con.executescript("PRAGMA cache_size = -2100000")
-
     con = sqlite3.connect(
         f"file:/__web__?mode=ro&immutable=1&vfs=web&web_url={urllib.parse.quote(TPCH_URI)}",
         uri=True,
     )
+    con.executescript("PRAGMA cache_size = -2100000")
     schema = list(con.execute("select type, name from sqlite_master"))
     print(schema)
 
@@ -104,12 +103,12 @@ def test_tpch_q8():
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
-    con.executescript("PRAGMA cache_size = -2100000")
-
     con = sqlite3.connect(
         f"file:/__web__?mode=ro&immutable=1&vfs=web&web_url={urllib.parse.quote(TPCH_URI)}",
         uri=True,
     )
+
+    con.executescript("PRAGMA cache_size = -2100000")
 
     results = list(
         con.execute(
