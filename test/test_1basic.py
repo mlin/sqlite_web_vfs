@@ -98,7 +98,7 @@ def test_tpch_q1():
     sys.stdout.flush()
 
 
-@pytest.mark.skipif("GITHUB_RUN_ID" not in os.environ, "run stressful Q8 on cloud only")
+@pytest.mark.skipif("GITHUB_RUN_ID" not in os.environ, reason="run stressful Q8 on cloud only")
 def test_tpch_q8():
     con = sqlite3.connect(f":memory:")
     con.enable_load_extension(True)
