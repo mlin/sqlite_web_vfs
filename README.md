@@ -10,6 +10,8 @@ file:/__web__?mode=ro&immutable=1&vfs=web&web_url={{PERCENT_ENCODED_URL}}
 
 where `{{PERCENT_ENCODED_URL}}` is the database file's complete http(s) URL passed through [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding) (doubly encoding its own query string, if any). The URL server must support [GET range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests) requests, and the content must be immutable for the session.
 
+See also our companion projects [sqlite_zstd_vfs](https://github.com/mlin/sqlite_zstd_vfs/) and [Genomics Extension for SQLite](https://github.com/mlin/GenomicSQLite), which *include* sqlite_web_vfs along with other features, most notably compression of the database file.
+
 **USE AT YOUR OWN RISK:** This project is not associated with the SQLite developers.
 
 ### Quick example
