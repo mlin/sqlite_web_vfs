@@ -320,6 +320,7 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
 
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);
     CURLsetopt(*conn, CURLOPT_MAXREDIRS, 4);
+    CURLsetopt(*conn, CURLOPT_CONNECTTIMEOUT, 10);
 
     CURLcall(curl_easy_perform(*conn));
 
@@ -390,7 +391,7 @@ CURLcode RetryRequest(Method method, const std::string &url, const headers &requ
 
         response_code = -1;
         response_headers.clear();
-        response_body_stream.clear();
+        response_body_stream.str(""); // ostringstream::clear() doesn't do this!
         rc = HTTP::Request(method, url, request_headers, response_code, response_headers,
                            response_body_stream, options.connpool);
         if (rc == CURLE_OK) {

@@ -468,7 +468,7 @@ class File : public SQLiteVFS::File {
             std::unique_lock<std::mutex> lock(mu_);
             fetch_queue_.clear();
             fetch_queue2_.clear();
-            // TODO: is it feasible to abort ongoing libcurl requests too?
+            // TODO: abort ongoing requests via atomic<bool> passed into libcurl progress function
             lock.unlock();
             threadpool_.Barrier();
             lock.lock();
