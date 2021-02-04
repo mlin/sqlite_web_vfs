@@ -6,7 +6,7 @@ ARG build_type=Release
 
 RUN apt-get -qq update && apt-get -qq install -y --no-install-recommends --no-install-suggests \
      ca-certificates git-core build-essential cmake \
-     libcurl4-openssl-dev sqlite3 libsqlite3-dev \
+     libcurl4-openssl-dev sqlite3 libsqlite3-dev libmicrohttpd-dev \
      python3-pytest pylint
 
 ADD . /work

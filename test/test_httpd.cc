@@ -13,7 +13,8 @@ MHD_Result on_request(void *cls, struct MHD_Connection *connection, const char *
 
 TestHTTPd::~TestHTTPd() { Stop(); }
 
-bool TestHTTPd::Start(unsigned short port, const map<string, string> &files) {
+bool TestHTTPd::Start(unsigned short port, const map<string, string> &files, const char *cert_pem,
+                      const char *key_pem) {
     if (d_) {
         cerr << "TestHTTPd::Start: daemon already running" << endl;
         return false;
@@ -21,9 +22,18 @@ bool TestHTTPd::Start(unsigned short port, const map<string, string> &files) {
 
     port_ = port;
     files_ = files;
-    d_ = MHD_start_daemon(MHD_USE_SELECT_INTERNALLY | MHD_USE_THREAD_PER_CONNECTION, port, nullptr,
-                          nullptr, &on_request, this, MHD_OPTION_CONNECTION_TIMEOUT, 10,
-                          MHD_OPTION_END);
+    if (!cert_pem || !key_pem) {
+        d_ = MHD_start_daemon(
+            MHD_USE_SELECT_INTERNALLY | MHD_USE_THREAD_PER_CONNECTION | MHD_USE_DEBUG, port,
+            nullptr, nullptr, &on_request, this, MHD_OPTION_CONNECTION_TIMEOUT, 10, MHD_OPTION_END);
+    } else {
+        d_ = MHD_start_daemon(
+            MHD_USE_SELECT_INTERNALLY | MHD_USE_THREAD_PER_CONNECTION | MHD_USE_SSL | MHD_USE_DEBUG,
+            port, nullptr, nullptr, &on_request, this, MHD_OPTION_CONNECTION_TIMEOUT, 10,
+            MHD_OPTION_HTTPS_MEM_CERT, cert_pem, MHD_OPTION_HTTPS_MEM_KEY, key_pem,
+
+            MHD_OPTION_END);
+    }
 
     if (!d_) {
         cerr << "TestHTTPd::Start: MHD_start_daemon failed" << endl;
@@ -91,8 +101,9 @@ MHD_Result TestHTTPd::OnRequest(MHD_Connection *connection, const char *url, con
                         if (!(response = MHD_create_response_from_fd(st.st_size, fd)))
                             return MHD_NO;
                     }
-                } else
+                } else {
                     response_code = 500;
+                }
             }
         }
     } else {

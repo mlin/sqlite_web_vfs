@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -108,10 +109,14 @@ class CURLconn {
     CURL *h_;
 
   public:
-    CURLconn() : h_(nullptr) {
+    CURLconn(bool insecure = false) : h_(nullptr) {
         h_ = curl_easy_init();
         if (!h_) {
             throw std::bad_alloc();
+        }
+        if (insecure) {
+            curl_easy_setopt(h_, CURLOPT_SSL_VERIFYPEER, 0);
+            curl_easy_setopt(h_, CURLOPT_SSL_VERIFYHOST, 0);
         }
     }
     virtual ~CURLconn() {
@@ -150,17 +155,18 @@ class CURLconn {
 // concurrent requests.)
 class CURLpool {
     unsigned int size_;
+    bool insecure_;
     std::queue<std::unique_ptr<CURLconn>> pool_;
     std::mutex mu_;
 
   public:
-    CURLpool(const unsigned int size) : size_(size) {}
+    CURLpool(const unsigned int size, bool insecure = false) : size_(size), insecure_(insecure) {}
 
     std::unique_ptr<CURLconn> checkout() {
         std::lock_guard<std::mutex> lock(mu_);
         std::unique_ptr<CURLconn> ans;
         if (pool_.empty()) {
-            ans.reset(new CURLconn());
+            ans.reset(new CURLconn(insecure_));
         } else {
             ans.reset(pool_.front().release());
             pool_.pop();

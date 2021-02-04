@@ -13,6 +13,10 @@
 #include <memory>
 #include <string>
 
+#if MHD_VERSION < 0x00097002
+#define MHD_Result int
+#endif
+
 class TestHTTPd {
     unsigned short port_;
     std::map<std::string, std::string> files_;
@@ -31,7 +35,8 @@ class TestHTTPd {
   public:
     virtual ~TestHTTPd();
 
-    bool Start(unsigned short port, const std::map<std::string, std::string> &files);
+    bool Start(unsigned short port, const std::map<std::string, std::string> &files,
+               const char *cert_pem = nullptr, const char *key_pem = nullptr);
     void FailNextRequests(unsigned int n) { requests_to_fail_ = n; }
     void SetFailProbability(double p_fail) { p_fail_ = p_fail; }
     void Stop();
