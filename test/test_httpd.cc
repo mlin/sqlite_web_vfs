@@ -80,7 +80,7 @@ MHD_Result TestHTTPd::OnRequest(MHD_Connection *connection, const char *url, con
                                       MHD_create_response_from_fd_at_offset64(hi - lo + 1, fd, lo)))
                                 return MHD_NO;
                             ostringstream content_range;
-                            content_range << lo << "-" << hi << "/" << st.st_size;
+                            content_range << "bytes " << lo << "-" << hi << "/" << st.st_size;
                             if (MHD_add_response_header(response, "content-range",
                                                         content_range.str().c_str()) == MHD_NO)
                                 return MHD_NO;
