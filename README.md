@@ -59,6 +59,8 @@ It's a good idea to [VACUUM](https://sqlite.org/lang_vacuum.html) a database fil
 
 Reading large database files, budget ~640 MiB RAM for the extension's prefetch buffers. (That ought to be enough for anybody.)
 
-### Logging
+### Configuration
 
 The extension logs a message to standard error upon any fatally failed HTTP request, and requests that succeed after having to be retried. The latter can be suppressed by setting `&web_log=1` in the open URI, or by setting environment `SQLITE_WEB_LOG=1` in the environment. The log level can be set to 0 to suppress all standard error logging, or increased up to 5 for individual request/response logging.
+
+To disable TLS certificate and hostname verification, set `&web_insecure=1` or `SQLITE_WEB_INSECURE=1`.

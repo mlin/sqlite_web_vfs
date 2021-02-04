@@ -3,7 +3,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
