@@ -8,7 +8,7 @@
 using namespace std;
 
 const short TEST_HTTPD_PORT = 8192;
-const int Q8_ITERATIONS = 10;
+const int Q8_ITERATIONS = 4;
 const char *Q8 = R"(
 select
     o_year,
