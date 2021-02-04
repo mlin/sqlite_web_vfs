@@ -154,6 +154,7 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
     };
 
     moodycamel::BlockingReaderWriterQueue<EnqueueFastJob> fast_queue_;
+    std::atomic<long long> fast_queue_size_;
     std::unique_ptr<std::thread> worker_thread_;
 
     void EnqueueFastWorker() {
@@ -164,12 +165,13 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
                 break;
             }
             this->Enqueue(job.x, job.par, job.ser);
+            fast_queue_size_--;
         }
     }
 
   public:
     ThreadPoolWithEnqueueFast(size_t max_threads, size_t max_jobs)
-        : ThreadPool(max_threads, max_jobs), fast_queue_(max_jobs) {}
+        : ThreadPool(max_threads, max_jobs), fast_queue_(max_jobs), fast_queue_size_(0) {}
 
     ~ThreadPoolWithEnqueueFast() {
         if (worker_thread_) {
@@ -186,19 +188,21 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
         job.x = x;
         job.par = par;
         job.ser = ser;
-        fast_queue_.enqueue(job);
         if (!worker_thread_) {
             worker_thread_.reset(new std::thread([this]() { this->EnqueueFastWorker(); }));
         }
+        fast_queue_size_++;
+        fast_queue_.enqueue(job);
     }
 
     void Barrier() override {
-        if (worker_thread_) {
-            EnqueueFastJob job;
-            job.shutdown = true;
-            fast_queue_.enqueue(job);
-            worker_thread_->join();
-            worker_thread_.reset();
+        while (fast_queue_size_.load(std::memory_order_relaxed)) {
+            assert(worker_thread_);
+#ifdef __x86_64__
+            __builtin_ia32_pause();
+#else
+            std::this_thread::yield();
+#endif
         }
         ThreadPool::Barrier();
     }
