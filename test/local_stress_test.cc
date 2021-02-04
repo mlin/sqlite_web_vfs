@@ -8,7 +8,22 @@
 using namespace std;
 
 const short TEST_HTTPD_PORT = 8192;
-const int Q8_ITERATIONS = 4;
+const int Q8_ITERATIONS = 10;
+const char *Q1 = R"(
+select
+    l_returnflag,
+    l_linestatus,
+    sum(l_quantity) as sum_qty,
+    sum(l_extendedprice) as sum_base_price,
+    sum(l_extendedprice*(1-l_discount)) as sum_disc_price,
+    sum(l_extendedprice*(1-l_discount)*(1+l_tax)) as sum_charge,
+    avg(l_quantity) as avg_qty,
+    avg(l_extendedprice) as avg_price,
+    avg(l_discount) as avg_disc, count(*) as count_order
+from lineitem
+where l_shipdate <= date('1998-12-01', '-90 day')
+group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;
+)";
 const char *Q8 = R"(
 select
     o_year,
@@ -93,7 +108,7 @@ void setup() {
     }
 }
 
-TEST_CASE("TPC-H Q8") {
+TEST_CASE("local HTTPS stress test") {
     setup();
 
     map<string, string> httpd_files;
@@ -127,6 +142,17 @@ TEST_CASE("TPC-H Q8") {
     for (int i = 0; i < Q8_ITERATIONS; ++i) {
         rows = 0;
         rc = sqlite3_exec(
+            db, Q1,
+            [](void *ctx, int n_col, char **cols, char **col_names) -> int {
+                cout << cols[0] << "\t" << cols[1] << endl;
+                (*(size_t *)ctx)++;
+                return 0;
+            },
+            &rows, nullptr);
+        REQUIRE(rc == 0);
+        REQUIRE(rows == 4);
+        rows = 0;
+        rc = sqlite3_exec(
             db, Q8,
             [](void *ctx, int n_col, char **cols, char **col_names) -> int {
                 cout << cols[0] << "\t" << cols[1] << endl;
@@ -134,6 +160,7 @@ TEST_CASE("TPC-H Q8") {
                 return 0;
             },
             &rows, nullptr);
+        REQUIRE(rc == 0);
         REQUIRE(rows == 2);
         cout << endl << (i + 1) << " / " << Q8_ITERATIONS << endl << endl;
     }
