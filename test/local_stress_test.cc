@@ -115,6 +115,7 @@ TEST_CASE("local HTTPS stress test") {
     httpd_files["/TPC-H.db"] = "/tmp/TPC-H.db";
     TestHTTPd httpd;
     REQUIRE(httpd.Start(TEST_HTTPD_PORT, httpd_files, cert_pem, key_pem));
+    httpd.SetFailProbability(0.02);
 
     string db_url =
         "file:/__web__?mode=ro&immutable=1&vfs=web&web_insecure=1&web_url=https://localhost:";

@@ -75,7 +75,7 @@ MHD_Result TestHTTPd::OnRequest(MHD_Connection *connection, const char *url, con
     unsigned int response_code = 404;
     MHD_Result ret;
 
-    if (requests_to_fail_ == 0 || p_fail_ > 0.0 && rand() % 10000 >= int(10000 * p_fail_)) {
+    if (requests_to_fail_ == 0 && (p_fail_ <= 0.0 || rand() % 10000 >= int(10000 * p_fail_))) {
         auto entry = files_.find(url);
         if (entry != files_.end()) {
             int fd = open(entry->second.c_str(), O_RDONLY);
