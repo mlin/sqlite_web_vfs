@@ -37,7 +37,18 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     SET_TARGET_PROPERTIES(web_vfs PROPERTIES PREFIX "")
     target_link_libraries(web_vfs PRIVATE pthread dl)  # EXCLUDE curl given HTTP_LAZYCURL -- see src/HTTP.h
 
+    FetchContent_Declare(
+        catch
+        GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
+        GIT_TAG         v2.13.4
+    )
+    FetchContent_MakeAvailable(catch)
+    include_directories(${catch_SOURCE_DIR}/single_include)
+    add_executable(local_stress_test test/local_stress_test.cc test/test_httpd.cc test/test_httpd.h)
+    target_link_libraries(local_stress_test PRIVATE sqlite3 curl microhttpd pthread dl)
+
     include(CTest)
     enable_testing()
     add_test(NAME pytest COMMAND env SQLITE_WEB_LOG=99 python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    add_test(NAME local_stress_test COMMAND local_stress_test)
 endif()

@@ -42,6 +42,8 @@ struct Extent {
             return 65536;
         case Size::MD:
             return 1048576;
+        default:
+            break;
         }
         return 16777216;
     }
@@ -353,9 +355,9 @@ class File : public SQLiteVFS::File {
             if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
                 Extent container = extent;
                 for (int i = 0; i < 2; ++i) {
-                    if (container.rank > 0 &&
-                            resident_.find(Extent(container.size, container.rank - 1)) !=
-                                resident_.end() ||
+                    if ((container.rank > 0 &&
+                         resident_.find(Extent(container.size, container.rank - 1)) !=
+                             resident_.end()) ||
                         resident_.find(Extent(container.size, container.rank + 1)) !=
                             resident_.end()) {
                         extent = container.Promote();
@@ -381,7 +383,7 @@ class File : public SQLiteVFS::File {
             if (extent.size < Extent::Size::LG) {
                 // if we used r-1 or r+1, initiate prefetch of the next size up
                 Extent promoted = extent.Promote();
-                if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1)) ||
+                if (((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
                      ResidentAndUsed(Extent(extent.size, extent.rank + 1))) &&
                     fetch_queue2_.find(promoted) == fetch_queue2_.end() &&
                     resident_.find(promoted) == resident_.end()) {
@@ -455,32 +457,35 @@ class File : public SQLiteVFS::File {
             stalled_micros_ += t.micros();
             return SQLITE_OK;
         } catch (int rc) {
-            return rc != SQLITE_OK ? rc : SQLITE_IOERR_READ;
+            return SQLITE_IOERR_READ;
         } catch (std::bad_alloc &) {
             return SQLITE_IOERR_NOMEM;
         }
     }
 
     int Close() override {
-        std::unique_lock<std::mutex> lock(mu_);
-        fetch_queue_.clear();
-        fetch_queue2_.clear();
-        // TODO: is it feasible to abort ongoing libcurl requests too?
-        lock.unlock();
-        threadpool_.Barrier();
-        lock.lock();
-        UpdateResident(lock);
-        EvictResident(lock, 0); // ensure we count wasted prefetches
-        if (log_level_ > 3) {
-            cerr << "[" << filename_ << "] page reads: " << read_count_
-                 << ", HTTP GETs: " << fetch_count_
-                 << " (prefetches ideal: " << ideal_prefetch_count_
-                 << ", wasted: " << wasted_prefetch_count_
-                 << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
-                 << fetch_bytes_ << " / " << file_size_ << ", stalled for "
-                 << (stalled_micros_ / 1000) << "ms" << endl
-                 << flush;
+        {
+            std::unique_lock<std::mutex> lock(mu_);
+            fetch_queue_.clear();
+            fetch_queue2_.clear();
+            // TODO: is it feasible to abort ongoing libcurl requests too?
+            lock.unlock();
+            threadpool_.Barrier();
+            lock.lock();
+            UpdateResident(lock);
+            EvictResident(lock, 0); // ensure we count wasted prefetches
+            if (log_level_ > 3) {
+                cerr << "[" << filename_ << "] page reads: " << read_count_
+                     << ", HTTP GETs: " << fetch_count_
+                     << " (prefetches ideal: " << ideal_prefetch_count_
+                     << ", wasted: " << wasted_prefetch_count_
+                     << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
+                     << fetch_bytes_ << " / " << file_size_ << ", stalled for "
+                     << (stalled_micros_ / 1000) << "ms" << endl
+                     << flush;
+            }
         }
+        // deletes this:
         return SQLiteVFS::File::Close();
     }
 
@@ -547,6 +552,15 @@ class VFS : public SQLiteVFS::Wrapper {
                 log_level = env_log_level;
             }
         }
+        bool insecure = sqlite3_uri_int64(zName, "web_insecure", 0) == 1;
+        const char *env_insecure = getenv("SQLITE_WEB_INSECURE");
+        if (env_insecure && *env_insecure) {
+            errno = 0;
+            unsigned long env_insecure_i = strtoul(env_insecure, nullptr, 10);
+            if (errno == 0 && env_insecure_i == 1) {
+                insecure = true;
+            }
+        }
 
         if (log_level > 4) {
             cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
@@ -572,7 +586,7 @@ class VFS : public SQLiteVFS::Wrapper {
         try {
             std::string uri;
             std::unique_ptr<HTTP::CURLpool> curlpool;
-            curlpool.reset(new HTTP::CURLpool(4));
+            curlpool.reset(new HTTP::CURLpool(4, insecure));
             auto conn = curlpool->checkout();
             if (!conn->unescape(encoded_uri, uri)) {
                 last_error_ = "Failed percent-decoding web_url";
