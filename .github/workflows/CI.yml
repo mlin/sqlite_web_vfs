@@ -41,7 +41,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: dependencies
       run: |
-        brew install python sqlite
+        brew install python sqlite libmicrohttpd
         /usr/local/bin/pip3 install $PIP_DEPS
     - name: build
       run: |

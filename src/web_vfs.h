@@ -42,6 +42,8 @@ struct Extent {
             return 65536;
         case Size::MD:
             return 1048576;
+        default:
+            break;
         }
         return 16777216;
     }
@@ -353,9 +355,9 @@ class File : public SQLiteVFS::File {
             if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
                 Extent container = extent;
                 for (int i = 0; i < 2; ++i) {
-                    if (container.rank > 0 &&
-                            resident_.find(Extent(container.size, container.rank - 1)) !=
-                                resident_.end() ||
+                    if ((container.rank > 0 &&
+                         resident_.find(Extent(container.size, container.rank - 1)) !=
+                             resident_.end()) ||
                         resident_.find(Extent(container.size, container.rank + 1)) !=
                             resident_.end()) {
                         extent = container.Promote();
@@ -381,7 +383,7 @@ class File : public SQLiteVFS::File {
             if (extent.size < Extent::Size::LG) {
                 // if we used r-1 or r+1, initiate prefetch of the next size up
                 Extent promoted = extent.Promote();
-                if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1)) ||
+                if (((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
                      ResidentAndUsed(Extent(extent.size, extent.rank + 1))) &&
                     fetch_queue2_.find(promoted) == fetch_queue2_.end() &&
                     resident_.find(promoted) == resident_.end()) {
