@@ -308,16 +308,21 @@ class File : public SQLiteVFS::File {
     }
 
     std::map<Extent, ResidentExtent>::iterator FindResidentExtent(uint64_t offset, size_t length) {
-        Extent extent = Extent::Containing(offset, length);
-        auto line = resident_.find(extent);
-        for (int i = 0; i < 2 && line == resident_.end(); ++i) {
-            line = resident_.find((extent = extent.Promote()));
-        }
+        Extent extent = Extent::Containing(offset, length), extent2 = extent.Promote(),
+               extent3 = extent2.Promote();
+        // prefer largest
+        auto line = resident_.find(extent3);
+        if (line != resident_.end())
+            return line;
+        line = resident_.find(extent2);
+        if (line != resident_.end())
+            return line;
+        line = resident_.find(extent);
         return line;
     }
 
     bool ResidentAndUsed(Extent extent) {
-        auto p = resident_.find(Extent(extent.size, extent.rank - 1));
+        auto p = resident_.find(extent);
         return p != resident_.end() && p->second.used;
     }
 
@@ -351,18 +356,20 @@ class File : public SQLiteVFS::File {
         if (line == resident_.end()) {
             // front-enqueue job to fetch the extent
             Extent extent = Extent::Containing(offset, length);
-            // if we already have an adjacent extent (at any size), promote to next size up
+            // if we already used the previous or next two extents (at any size), promote size up
             if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
                 Extent container = extent;
                 for (int i = 0; i < 2; ++i) {
-                    if ((container.rank > 0 &&
-                         resident_.find(Extent(container.size, container.rank - 1)) !=
-                             resident_.end()) ||
-                        resident_.find(Extent(container.size, container.rank + 1)) !=
-                            resident_.end()) {
-                        extent = container.Promote();
-                    }
+                    bool fwd = container.rank > 0 &&
+                               ResidentAndUsed(Extent(container.size, container.rank - 1)) &&
+                               (container.rank == 1 ||
+                                ResidentAndUsed(Extent(container.size, container.rank - 2)));
+                    bool rev = ResidentAndUsed(Extent(container.size, container.rank + 1)) &&
+                               ResidentAndUsed(Extent(container.size, container.rank + 2));
                     container = container.Promote();
+                    if (fwd || rev) {
+                        extent = container;
+                    }
                 }
             }
             if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
@@ -381,18 +388,20 @@ class File : public SQLiteVFS::File {
             // initiate background prefetch for other, nearby extents
             Extent extent = line->first;
             if (extent.size < Extent::Size::LG) {
-                // if we used r-1 or r+1, initiate prefetch of the next size up
+                // if we used the previous or next two extents of the same size, initiate prefetch
+                // of the next size up
                 Extent promoted = extent.Promote();
-                if (((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
-                     ResidentAndUsed(Extent(extent.size, extent.rank + 1))) &&
-                    fetch_queue2_.find(promoted) == fetch_queue2_.end() &&
-                    resident_.find(promoted) == resident_.end()) {
+                if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1)) &&
+                     (extent.rank == 1 || ResidentAndUsed(Extent(extent.size, extent.rank - 2)))) ||
+                    (ResidentAndUsed(Extent(extent.size, extent.rank + 1)) &&
+                     ResidentAndUsed(Extent(extent.size, extent.rank + 2)))) {
                     fetch_queue_.push_back(promoted);
                     fetch_queue2_.insert(promoted);
                     threadpool_.EnqueueFast(this, FetchJob, nullptr);
                 }
             } else {
-                // large size: if we used r-1 resident, prefetch r+1, and vice versa
+                // large size: prefetch up to 4 subsequent/preceding extents if we seem to have
+                // momentum in a big table scan
                 for (int ofs = 1; ofs <= 4; ++ofs) {
                     if (extent.rank >= ofs &&
                         ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
