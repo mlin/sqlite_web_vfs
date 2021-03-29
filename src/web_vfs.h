@@ -350,28 +350,25 @@ class File : public SQLiteVFS::File {
             assert(p != resident_.end());
             return p->second;
         }
+
         std::unique_lock<std::mutex> lock(mu_);
         // find a resident extent containing desired page
         UpdateResident(lock);
         auto line = FindResidentExtent(offset, length);
         bool blocked = false;
+
         if (line == resident_.end()) {
-            // front-enqueue job to fetch the extent
+            // Needed extent not resident: front-enqueue job to fetch it
             Extent extent = Extent::Containing(offset, length);
-            // if we already used the previous or next two extents (at any size), promote size up
-            if (extent.rank > 0 && Extent(extent.size, extent.rank + 1).Exists(file_size_)) {
-                Extent container = extent;
-                for (int i = 0; i < 2; ++i) {
-                    bool fwd = container.rank > 0 &&
-                               ResidentAndUsed(Extent(container.size, container.rank - 1)) &&
-                               (container.rank == 1 ||
-                                ResidentAndUsed(Extent(container.size, container.rank - 2)));
-                    bool rev = ResidentAndUsed(Extent(container.size, container.rank + 1)) &&
-                               ResidentAndUsed(Extent(container.size, container.rank + 2));
-                    container = container.Promote();
-                    if (fwd || rev) {
-                        extent = container;
-                    }
+            // if we already used the previous or next extent (at any size), promote size up
+            Extent container = extent;
+            for (int i = 0; i < 2; ++i) {
+                bool fwd = container.rank > 0 &&
+                           ResidentAndUsed(Extent(container.size, container.rank - 1));
+                bool rev = ResidentAndUsed(Extent(container.size, container.rank + 1));
+                container = container.Promote();
+                if (fwd || rev) {
+                    extent = container;
                 }
             }
             if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
@@ -385,61 +382,58 @@ class File : public SQLiteVFS::File {
                 UpdateResident(lock);
             } while ((line = FindResidentExtent(offset, length)) == resident_.end());
             blocked = true;
-        } else {
-            // upon finding the desired page in an already-resident extent, decide whether to
-            // initiate background prefetch for other, nearby extents
-            Extent extent = line->first;
-            if (extent.size < Extent::Size::LG) {
-                // if we used the previous or next two extents of the same size, initiate prefetch
-                // of the next size up
+        }
+
+        // Possibly also initiate prefetch of nearby/surrounding extents
+        Extent extent = line->first;
+        if (extent.size < Extent::Size::LG) {
+            // if we used the previous or next extent of the same size, initiate prefetch of the
+            // next size up
+            if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
+                (ResidentAndUsed(Extent(extent.size, extent.rank + 1)))) {
                 Extent promoted = extent.Promote();
-                if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1)) &&
-                     (extent.rank == 1 || ResidentAndUsed(Extent(extent.size, extent.rank - 2)))) ||
-                    (ResidentAndUsed(Extent(extent.size, extent.rank + 1)) &&
-                     ResidentAndUsed(Extent(extent.size, extent.rank + 2)))) {
-                    fetch_queue_.push_back(promoted);
-                    fetch_queue2_.insert(promoted);
-                    threadpool_.EnqueueFast(this, FetchJob, nullptr);
-                }
-            } else {
-                // large size: prefetch up to 4 subsequent/preceding extents if we seem to have
-                // momentum in a big table scan
-                for (int ofs = 1; ofs <= 4; ++ofs) {
-                    if (extent.rank >= ofs &&
-                        ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
-                        Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
-                        if (succ.Exists(file_size_) && resident_.find(succ) == resident_.end() &&
-                            fetch_queue2_.find(succ) == fetch_queue2_.end()) {
-                            fetch_queue_.push_back(succ);
-                            fetch_queue2_.insert(succ);
-                            threadpool_.EnqueueFast(this, FetchJob, nullptr);
-                        }
-                    } else {
-                        break;
+                fetch_queue_.push_back(promoted);
+                fetch_queue2_.insert(promoted);
+                threadpool_.EnqueueFast(this, FetchJob, nullptr);
+            }
+        } else {
+            // large size: prefetch up to 4 subsequent/preceding extents if we seem to have
+            // momentum in a contiguous scan
+            for (int ofs = 1; ofs <= 4; ++ofs) {
+                if (extent.rank >= ofs &&
+                    ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
+                    Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
+                    if (succ.Exists(file_size_) && resident_.find(succ) == resident_.end() &&
+                        fetch_queue2_.find(succ) == fetch_queue2_.end()) {
+                        fetch_queue_.push_back(succ);
+                        fetch_queue2_.insert(succ);
+                        threadpool_.EnqueueFast(this, FetchJob, nullptr);
                     }
+                } else {
+                    break;
                 }
-                for (int ofs = 1; ofs <= 4; ++ofs) {
-                    if (extent.rank >= ofs &&
-                        ResidentAndUsed(Extent(Extent::Size::LG, extent.rank + ofs))) {
-                        Extent pred = Extent(Extent::Size::LG, extent.rank - ofs);
-                        if (resident_.find(pred) == resident_.end() &&
-                            fetch_queue2_.find(pred) == fetch_queue2_.end()) {
-                            fetch_queue_.push_back(pred);
-                            fetch_queue2_.insert(pred);
-                            threadpool_.EnqueueFast(this, FetchJob, nullptr);
-                        }
-                    } else {
-                        break;
+            }
+            for (int ofs = 1; ofs <= 4; ++ofs) {
+                if (extent.rank >= ofs &&
+                    ResidentAndUsed(Extent(Extent::Size::LG, extent.rank + ofs))) {
+                    Extent pred = Extent(Extent::Size::LG, extent.rank - ofs);
+                    if (resident_.find(pred) == resident_.end() &&
+                        fetch_queue2_.find(pred) == fetch_queue2_.end()) {
+                        fetch_queue_.push_back(pred);
+                        fetch_queue2_.insert(pred);
+                        threadpool_.EnqueueFast(this, FetchJob, nullptr);
                     }
+                } else {
+                    break;
                 }
             }
         }
 
         // LRU bookkeeping: delete old seqno_ from the secondary index, then record the new one
-        assert(!(line->first < line->second.extent || line->second.extent < line->first));
+        assert(!(extent < line->second.extent || line->second.extent < extent));
         assert(usage_.find(line->second.seqno) != usage_.end());
         usage_.erase(line->second.seqno); // old seqno
-        usage_[++extent_seqno_] = line->first;
+        usage_[++extent_seqno_] = extent;
         line->second.seqno = extent_seqno_;
         if (!blocked && !line->second.used) {
             ideal_prefetch_count_++;
