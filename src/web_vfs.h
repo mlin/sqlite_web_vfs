@@ -214,12 +214,14 @@ class File : public SQLiteVFS::File {
             if (log_level_ > 3) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                     << " OK (" << (t.micros() / 1000) << "ms)" << endl
+                     << " OK (" << data->size() / 1024 << "KiB, " << (t.micros() / 1000) << "ms)"
+                     << endl
                      << flush;
             } else if (log_level_ > 1 && retried) {
                 std::lock_guard<std::mutex> lock(mu_);
                 cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                     << " OK after retry (" << (t.micros() / 1000) << "ms)" << endl
+                     << " OK after retry (" << data->size() / 1024 << "KiB, " << (t.micros() / 1000)
+                     << "ms)" << endl
                      << flush;
             }
             return SQLITE_OK;
