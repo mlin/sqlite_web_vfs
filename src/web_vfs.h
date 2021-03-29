@@ -124,7 +124,6 @@ class File : public SQLiteVFS::File {
 
     // state for [pre]fetch on background threads
     std::deque<Extent> fetch_queue_;             // queue of fetch ops
-    std::set<Extent> fetch_queue2_;              // secondary index of fetch_queue_
     std::set<Extent> fetch_wip_;                 // fetch ops currently underway
     std::map<Extent, shared_string> fetch_done_; // completed fetches waiting to be merged
     std::map<Extent, int> fetch_error_;          // error codes
@@ -244,13 +243,10 @@ class File : public SQLiteVFS::File {
 
         // dequeue a desired extent
         if (self->fetch_queue_.empty()) {
-            assert(self->fetch_queue2_.empty());
             return nullptr;
         }
         Extent extent = self->fetch_queue_.front();
         self->fetch_queue_.pop_front();
-        assert(self->fetch_queue2_.find(extent) != self->fetch_queue2_.end());
-        self->fetch_queue2_.erase(extent);
 
         // coalesce request if same extent or one containing it is already wip or done
         Extent container = extent;
@@ -358,24 +354,19 @@ class File : public SQLiteVFS::File {
         bool blocked = false;
 
         if (line == resident_.end()) {
-            // Needed extent not resident: front-enqueue job to fetch it
+            // needed extent not resident: front-enqueue job to fetch it
             Extent extent = Extent::Containing(offset, length);
-            // if we already used the previous or next extent (at any size), promote size up
-            Extent container = extent;
-            for (int i = 0; i < 2; ++i) {
-                bool fwd = container.rank > 0 &&
-                           ResidentAndUsed(Extent(container.size, container.rank - 1));
-                bool rev = ResidentAndUsed(Extent(container.size, container.rank + 1));
-                container = container.Promote();
-                if (fwd || rev) {
-                    extent = container;
-                }
+            // promote up to medium if we already used the previous small or medium extent
+            Extent container = extent.Promote(), container2 = container.Promote();
+            if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
+                ResidentAndUsed(Extent(extent.size, extent.rank + 1)) ||
+                (container.rank > 0 &&
+                 ResidentAndUsed(Extent(container.size, container.rank - 1))) ||
+                ResidentAndUsed(Extent(container.size, container.rank + 1))) {
+                extent = container;
             }
-            if (fetch_queue2_.find(extent) == fetch_queue2_.end()) {
-                fetch_queue_.push_front(extent);
-                fetch_queue2_.insert(extent);
-                threadpool_.EnqueueFast(this, FetchJob, nullptr);
-            }
+            fetch_queue_.push_front(extent);
+            threadpool_.EnqueueFast(this, FetchJob, nullptr);
             // wait for it
             do {
                 fetch_cv_.wait(lock);
@@ -384,16 +375,14 @@ class File : public SQLiteVFS::File {
             blocked = true;
         }
 
-        // Possibly also initiate prefetch of nearby/surrounding extents
+        // if appropriate, initiate prefetch of nearby/surrounding extents
         Extent extent = line->first;
         if (extent.size < Extent::Size::LG) {
             // if we used the previous or next extent of the same size, initiate prefetch of the
             // next size up
             if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
                 (ResidentAndUsed(Extent(extent.size, extent.rank + 1)))) {
-                Extent promoted = extent.Promote();
-                fetch_queue_.push_back(promoted);
-                fetch_queue2_.insert(promoted);
+                fetch_queue_.push_back(extent.Promote());
                 threadpool_.EnqueueFast(this, FetchJob, nullptr);
             }
         } else {
@@ -403,10 +392,8 @@ class File : public SQLiteVFS::File {
                 if (extent.rank >= ofs &&
                     ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
                     Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
-                    if (succ.Exists(file_size_) && resident_.find(succ) == resident_.end() &&
-                        fetch_queue2_.find(succ) == fetch_queue2_.end()) {
+                    if (succ.Exists(file_size_)) {
                         fetch_queue_.push_back(succ);
-                        fetch_queue2_.insert(succ);
                         threadpool_.EnqueueFast(this, FetchJob, nullptr);
                     }
                 } else {
@@ -416,13 +403,8 @@ class File : public SQLiteVFS::File {
             for (int ofs = 1; ofs <= 4; ++ofs) {
                 if (extent.rank >= ofs &&
                     ResidentAndUsed(Extent(Extent::Size::LG, extent.rank + ofs))) {
-                    Extent pred = Extent(Extent::Size::LG, extent.rank - ofs);
-                    if (resident_.find(pred) == resident_.end() &&
-                        fetch_queue2_.find(pred) == fetch_queue2_.end()) {
-                        fetch_queue_.push_back(pred);
-                        fetch_queue2_.insert(pred);
-                        threadpool_.EnqueueFast(this, FetchJob, nullptr);
-                    }
+                    fetch_queue_.push_back(Extent(Extent::Size::LG, extent.rank - ofs));
+                    threadpool_.EnqueueFast(this, FetchJob, nullptr);
                 } else {
                     break;
                 }
@@ -472,7 +454,6 @@ class File : public SQLiteVFS::File {
         {
             std::unique_lock<std::mutex> lock(mu_);
             fetch_queue_.clear();
-            fetch_queue2_.clear();
             // TODO: abort ongoing requests via atomic<bool> passed into libcurl progress function
             lock.unlock();
             threadpool_.Barrier();
