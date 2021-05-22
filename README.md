@@ -55,9 +55,9 @@ The extension library is `build/web_vfs.so` or `build/web_vfs.dylib`.
 
 SQLite reads one small page at a time (default 4 KiB), which would be inefficient to serve with HTTP requests one-to-one. Instead, the extension adaptively consolidates page fetching into larger HTTP requests, and concurrently reads ahead on background threads. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes (and a modest number thereof). It's less suitable for big multi-way joins and other aggressively random access patterns; in those cases, it's better to download the database file upfront to open locally.
 
-It's a good idea to [VACUUM](https://sqlite.org/lang_vacuum.html) a database file before serving it over the web, and to increase the reader's [page cache size](https://www.sqlite.org/pragma.html#pragma_cache_size).
+To optimize a database file to be served over the web, write it with the largest possible [page size](https://www.sqlite.org/pragma.html#pragma_page_size) of 64 KiB, and [VACUUM](https://sqlite.org/lang_vacuum.html) it once the contents are finalized. These steps minimize the random accesses needed for queries.
 
-Reading large database files, budget ~640 MiB RAM for the extension's prefetch buffers. (That ought to be enough for anybody.)
+Readers should enlarge their [page cache](https://www.sqlite.org/pragma.html#pragma_cache_size) capacity as much as feasible, while budgeting an additional ~640 MiB RAM for the extension's prefetch buffers. (That ought to be enough for anybody.)
 
 ### Configuration
 
