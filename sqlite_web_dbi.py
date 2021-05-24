@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Creates a .dbi index file to accelerate web access for an immutable SQLite database file.
+Creates a .dbi helper file to accelerate web access for an immutable SQLite database.
 
 Scans the database file to identify key pages that readers will use frequently:
     - first page
@@ -113,6 +113,18 @@ def read_db_header(dbfile):
 def read_db_btrees(dbfile):
     "List the table and index names"
     dbh = sqlite3.connect(dbfile)
+
+    # detect a common failure mode (SQLite3 not built with dbstat)
+    try:
+        next(dbh.execute("select pageno from dbstat limit 1"))
+    except sqlite3.OperationalError as exn:
+        if "no such table: dbstat" in str(exn):
+            raise RuntimeError(
+                "This tool requires SQLite3 to have been built with SQLITE_ENABLE_DBSTAT_VTAB"
+            )
+        else:
+            raise
+
     page_size = next(dbh.execute("pragma page_size"))[0]
     btrees = [row[0] for row in dbh.execute("select name from sqlite_master")]
     dbh.close()

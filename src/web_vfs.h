@@ -685,6 +685,7 @@ class VFS : public SQLiteVFS::Wrapper {
             int dbi_rc = SQLITE_NOTFOUND;
             if (dbi_fut.valid() && (dbi_rc = dbi_fut.get()) == SQLITE_OK) {
                 // verify header match between main database & .dbi
+                assert(dbi);
                 std::string dbi_header;
                 dbi_rc = dbi->MainDatabaseHeader(dbi_header);
                 if (dbi_rc == SQLITE_OK && dbi_header != db_header) {

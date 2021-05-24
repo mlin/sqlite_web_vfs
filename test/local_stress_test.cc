@@ -99,8 +99,9 @@ const char key_pem[] = "-----BEGIN RSA PRIVATE KEY-----\n"
 void setup() {
     static bool first = true;
     if (first) {
-        int rc = system("aria2c -c -d /tmp -s 10 -x 10 --retry-wait 2 "
-                        "https://github.com/lovasoa/TPCH-sqlite/releases/download/v1.0/TPC-H.db");
+        int rc =
+            system("aria2c -c -d /tmp -s 10 -x 10 --retry-wait 2 "
+                   "https://github.com/mlin/sqlite_web_vfs/releases/download/test-db-v1/TPC-H.db");
         REQUIRE(rc == 0);
         (new WebVFS::VFS())->Register("web");
         atexit([]() { curl_global_cleanup(); }); // otherwise valgrind shows leak warnings

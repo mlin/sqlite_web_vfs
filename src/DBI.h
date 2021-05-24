@@ -1,17 +1,57 @@
 #pragma once
 
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 class DBI {
     std::shared_ptr<sqlite3> dbiconn_ = nullptr;
     std::shared_ptr<sqlite3_stmt> cursor_;
-    std::string last_error_;
+    std::string temp_dbifile_, last_error_;
 
     DBI(std::shared_ptr<sqlite3> dbiconn) : dbiconn_(dbiconn) {}
 
-    int Prepare(std::string &error) noexcept {
-        // TODO: VACUUM INTO local temp file, reopen it
-        // TODO: pragma integrity_check?
-        int rc =
-            sqlite3_exec(dbiconn_.get(), "pragma cache_size = -1048576", nullptr, nullptr, nullptr);
+    int Prepare(bool web, std::string &error) noexcept {
+        int rc;
+        if (web) {
+            // download remote .dbi to local temporary file and reopen that
+            temp_dbifile_ = unixTempFileDir();
+            if (!temp_dbifile_.empty() && temp_dbifile_[temp_dbifile_.size() - 1] != '/') {
+                temp_dbifile_ += '/';
+            }
+            temp_dbifile_ += "sqlite_web_vfs_dbi.XXXXXX";
+            int rc = mkstemp((char *)temp_dbifile_.data());
+            if (rc < 0) {
+                error = "failed generating temporary filename for .dbi download: ";
+                error += sqlite3_errmsg(dbiconn_.get());
+                return SQLITE_ERROR;
+            }
+            close(rc);
+
+            auto vacuum_sql = "vacuum into '" + temp_dbifile_ + "'";
+            rc = sqlite3_exec(dbiconn_.get(), vacuum_sql.c_str(), nullptr, nullptr, nullptr);
+            if (rc != SQLITE_OK) {
+                error = "failed downloading .dbi to temporary file: ";
+                error += sqlite3_errmsg(dbiconn_.get());
+                return rc;
+            }
+            dbiconn_.reset();
+
+            std::string temp_uri = "file:" + temp_dbifile_ + "?mode=ro&immutable=1";
+            sqlite3 *raw_dbiconn = nullptr;
+            rc = sqlite3_open_v2(temp_uri.c_str(), &raw_dbiconn,
+                                 SQLITE_OPEN_URI | SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+                                 nullptr);
+            if (rc != SQLITE_OK) {
+                error = "failed opening .dbi after downloading: ";
+                error += sqlite3_errstr(rc);
+                return rc;
+            }
+            dbiconn_ = std::shared_ptr<sqlite3>(raw_dbiconn, sqlite3_close_v2);
+        }
+
+        // tune connection and prepare query
+        rc = sqlite3_exec(dbiconn_.get(), "pragma cache_size = -16384", nullptr, nullptr, nullptr);
         if (rc != SQLITE_OK) {
             error = sqlite3_errmsg(dbiconn_.get());
             return rc;
@@ -27,16 +67,50 @@ class DBI {
         return Seek(0);
     }
 
+    /*
+    ** Originally from sqlite os_unix.c:
+    ** Return the name of a directory in which to put temporary files.
+    ** If no suitable temporary file directory can be found, return NULL.
+    */
+    const char *unixTempFileDir(void) {
+        static const char *azDirs[] = {0, 0, "/tmp", "."};
+        unsigned int i = 0;
+        struct stat buf;
+        const char *zDir = 0;
+
+        if (!azDirs[0])
+            azDirs[0] = getenv("SQLITE_TMPDIR");
+        if (!azDirs[1])
+            azDirs[1] = getenv("TMPDIR");
+        while (1) {
+            if (zDir != 0 && stat(zDir, &buf) == 0 && S_ISDIR(buf.st_mode) &&
+                access(zDir, 03) == 0) {
+                return zDir;
+            }
+            if (i >= sizeof(azDirs) / sizeof(azDirs[0]))
+                break;
+            zDir = azDirs[i++];
+        }
+        return 0;
+    }
+
   public:
-    virtual ~DBI() {}
+    virtual ~DBI() {
+        dbiconn_.reset();
+        if (!temp_dbifile_.empty()) {
+            unlink(temp_dbifile_.c_str());
+        }
+    }
 
     static int Open(HTTP::CURLconn *curlconn, const std::string &dbi_url, bool web_insecure,
                     int web_log, std::unique_ptr<DBI> &dbi, std::string &error) noexcept {
         error.clear();
 
+        bool web = true;
         std::string open_uri = "?mode=ro&immutable=1";
         if (dbi_url.substr(0, 5) == "file:") {
             open_uri = dbi_url + open_uri;
+            web = false;
         } else {
             std::string encoded_url;
             if (!curlconn->escape(dbi_url, encoded_url) || encoded_url.size() < dbi_url.size()) {
@@ -61,9 +135,10 @@ class DBI {
             return rc;
         }
         dbi.reset(new DBI(std::shared_ptr<sqlite3>(raw_dbiconn, sqlite3_close_v2)));
-        rc = dbi->Prepare(error);
+        rc = dbi->Prepare(web, error);
         if (rc != SQLITE_OK) {
             dbi.reset();
+            return rc;
         }
         return SQLITE_OK;
     }
