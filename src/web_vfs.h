@@ -3,6 +3,7 @@
 #include "HTTP.h"
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
+#include <future>
 #include <set>
 
 namespace WebVFS {
@@ -10,6 +11,8 @@ namespace WebVFS {
 using std::cerr;
 using std::endl;
 using std::flush;
+
+#include "DBI.h"
 
 class Timer {
     unsigned long long t0_;
@@ -97,6 +100,7 @@ class File : public SQLiteVFS::File {
     const std::string uri_, filename_;
     const sqlite_int64 file_size_;
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
+    std::unique_ptr<DBI> dbi_;
     const unsigned long log_level_ = 1;
 
     // Extents cached for potential reuse, with a last-use timestamp for LRU eviction.
@@ -131,7 +135,7 @@ class File : public SQLiteVFS::File {
     std::condition_variable fetch_cv_;           // on add to fetch_done_ or fetch_error_
 
     // performance counters
-    uint64_t read_count_ = 0, fetch_count_ = 0, ideal_prefetch_count_ = 0,
+    uint64_t read_count_ = 0, dbi_read_count_ = 0, fetch_count_ = 0, ideal_prefetch_count_ = 0,
              wasted_prefetch_count_ = 0, read_bytes_ = 0, fetch_bytes_ = 0, stalled_micros_ = 0;
 
     // run HTTP GET request for an extent
@@ -455,10 +459,32 @@ class File : public SQLiteVFS::File {
             return SQLITE_IOERR_READ;
         }
         try {
-            ResidentExtent resext = EnsureResidentExtent(iOfst, iAmt);
-            assert(resext.extent.Contains(iOfst, iAmt));
-            assert(resext.data->size() + resext.extent.Offset() >= iOfst + iAmt);
-            memcpy(zBuf, resext.data->c_str() + (iOfst - resext.extent.Offset()), iAmt);
+            int dbi_rc = SQLITE_NOTFOUND;
+            if (dbi_) {
+                // shortcut: serve page from .dbi if available
+                dbi_rc = dbi_->Seek(iOfst);
+                if (dbi_rc == SQLITE_OK) {
+                    if (dbi_->PageSize() >= iAmt) {
+                        memcpy(zBuf, dbi_->PageData(), iAmt);
+                        dbi_read_count_++;
+                    } else if (log_level_) {
+                        cerr << "[" << filename_ << "] unexpected page size " << dbi_->PageSize()
+                             << " in .dbi  @ offset " << iOfst << endl
+                             << flush;
+                    }
+                } else if (dbi_rc != SQLITE_NOTFOUND && log_level_) {
+                    cerr << "[" << filename_ << "] failed reading page @ offset " << iOfst
+                         << " from .dbi: " << dbi_->GetLastError() << endl
+                         << flush;
+                }
+            }
+            if (dbi_rc != SQLITE_OK) {
+                // main path
+                ResidentExtent resext = EnsureResidentExtent(iOfst, iAmt);
+                assert(resext.extent.Contains(iOfst, iAmt));
+                assert(resext.data->size() + resext.extent.Offset() >= iOfst + iAmt);
+                memcpy(zBuf, resext.data->c_str() + (iOfst - resext.extent.Offset()), iAmt);
+            }
             read_count_++;
             read_bytes_ += iAmt;
             stalled_micros_ += t.micros();
@@ -482,8 +508,11 @@ class File : public SQLiteVFS::File {
             UpdateResident(lock);
             EvictResident(lock, 0); // ensure we count wasted prefetches
             if (log_level_ > 3) {
-                cerr << "[" << filename_ << "] page reads: " << read_count_
-                     << ", HTTP GETs: " << fetch_count_
+                cerr << "[" << filename_ << "] page reads: " << read_count_;
+                if (dbi_) {
+                    cerr << " (from .dbi: " << dbi_read_count_ << ")";
+                }
+                cerr << ", HTTP GETs: " << fetch_count_
                      << " (prefetches ideal: " << ideal_prefetch_count_
                      << ", wasted: " << wasted_prefetch_count_
                      << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
@@ -525,9 +554,10 @@ class File : public SQLiteVFS::File {
 
   public:
     File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
-         std::unique_ptr<HTTP::CURLpool> &&curlpool, unsigned long log_level = 1)
+         std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<DBI> &&dbi,
+         unsigned long log_level = 1)
         : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
-          log_level_(log_level), threadpool_(4, 16) {
+          dbi_(std::move(dbi)), log_level_(log_level), threadpool_(4, 16) {
         methods_.iVersion = 1;
     }
 };
@@ -568,6 +598,17 @@ class VFS : public SQLiteVFS::Wrapper {
                 insecure = true;
             }
         }
+        bool no_dbi = sqlite3_uri_boolean(zName, "web_nodbi", 0);
+        const char *env_nodbi = getenv("SQLITE_WEB_NODBI");
+        if (env_nodbi && *env_nodbi) {
+            errno = 0;
+            unsigned long env_nodbi_i = strtoul(env_nodbi, nullptr, 10);
+            if (errno == 0 && env_nodbi_i > 0) {
+                no_dbi = true;
+            }
+        }
+        const char *encoded_dbi_uri =
+            no_dbi ? nullptr : sqlite3_uri_parameter(zName, "web_dbi_url");
 
         if (log_level > 4) {
             cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
@@ -591,7 +632,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
         // get desired URI
         try {
-            std::string uri;
+            std::string uri, dbi_uri, reencoded_dbi_uri;
             std::unique_ptr<HTTP::CURLpool> curlpool;
             curlpool.reset(new HTTP::CURLpool(4, insecure));
             auto conn = curlpool->checkout();
@@ -599,8 +640,31 @@ class VFS : public SQLiteVFS::Wrapper {
                 last_error_ = "Failed percent-decoding web_url";
                 return SQLITE_CANTOPEN;
             }
-            curlpool->checkin(conn);
+            if (!no_dbi && encoded_dbi_uri && encoded_dbi_uri[0] &&
+                !conn->unescape(encoded_dbi_uri, dbi_uri)) {
+                last_error_ = "Failed percent-decoding web_dbi_url";
+                return SQLITE_CANTOPEN;
+            }
 
+            if (log_level > 2) {
+                cerr << "[web_vfs] opening " << uri << endl << flush;
+            }
+
+            // spawn background thread to sniff .dbi
+            bool dbi_explicit = !dbi_uri.empty() && !no_dbi;
+            if (!dbi_explicit && !no_dbi && uri.find('?') == std::string::npos) {
+                dbi_uri = uri + ".dbi";
+            }
+            std::future<int> dbi_fut;
+            std::unique_ptr<DBI> dbi;
+            std::string dbi_error;
+            if (!dbi_uri.empty()) {
+                dbi_fut = std::async(std::launch::async, [&] {
+                    return DBI::Open(conn.get(), dbi_uri, insecure, log_level, dbi, dbi_error);
+                });
+            }
+
+            // read main database header
             long long file_size = -1;
             std::string db_header;
             if (file_size <= 0) {
@@ -611,10 +675,41 @@ class VFS : public SQLiteVFS::Wrapper {
                 assert(file_size >= 0);
             }
 
+            // collect result of .dbi sniff
+            int dbi_rc = SQLITE_NOTFOUND;
+            if (dbi_fut.valid() && (dbi_rc = dbi_fut.get()) == SQLITE_OK) {
+                // verify header match between main database & .dbi
+                std::string dbi_header;
+                dbi_rc = dbi->MainDatabaseHeader(dbi_header);
+                if (dbi_rc == SQLITE_OK && dbi_header != db_header) {
+                    dbi_rc = SQLITE_CORRUPT;
+                    dbi_error = ".dbi does not match main database file";
+                    if (log_level > 1) {
+                        cerr << "[" << FileNameForLog(uri) << "] " << dbi_error << ": " << dbi_uri
+                             << endl
+                             << flush;
+                    }
+                }
+            }
+            if (dbi_rc != SQLITE_OK) {
+                dbi.reset();
+                if (dbi_error.empty()) {
+                    dbi_error = sqlite3_errstr(dbi_rc);
+                }
+                if (!no_dbi && ((dbi_explicit && log_level > 1) || log_level > 2)) {
+                    cerr << "[" << FileNameForLog(uri) << "] opened without .dbi (" << dbi_error
+                         << ")" << endl
+                         << flush;
+                }
+            } else if (log_level > 2) {
+                cerr << "[" << FileNameForLog(uri) << "] opened with .dbi" << endl << flush;
+            }
+            curlpool->checkin(conn);
+
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
-            auto webfile =
-                new File(uri, FileNameForLog(uri), file_size, std::move(curlpool), log_level);
+            auto webfile = new File(uri, FileNameForLog(uri), file_size, std::move(curlpool),
+                                    std::move(dbi), log_level);
             webfile->InitHandle(pFile);
             *pOutFlags = flags;
             return SQLITE_OK;

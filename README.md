@@ -51,16 +51,27 @@ env -C build ctest -V
 
 The extension library is `build/web_vfs.so` or `build/web_vfs.dylib`.
 
-### Optimization
-
-SQLite reads one small page at a time (default 4 KiB), which would be inefficient to serve with HTTP requests one-to-one. Instead, the extension adaptively consolidates page fetching into larger HTTP requests, and concurrently reads ahead on background threads. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes (and a modest number thereof). It's less suitable for big multi-way joins and other aggressively random access patterns; in those cases, it's better to download the database file upfront to open locally.
-
-To optimize a database file to be served over the web, write it with the largest possible [page size](https://www.sqlite.org/pragma.html#pragma_page_size) of 64 KiB, and [VACUUM](https://sqlite.org/lang_vacuum.html) it once the contents are finalized. These steps minimize the random accesses needed for queries.
-
-Readers should enlarge their [page cache](https://www.sqlite.org/pragma.html#pragma_cache_size) capacity as much as feasible, while budgeting an additional ~640 MiB RAM for the extension's prefetch buffers. (That ought to be enough for anybody.)
 
 ### Configuration
 
 The extension logs a message to standard error upon any fatally failed HTTP request, and requests that succeed after having to be retried. The latter can be suppressed by setting `&web_log=1` in the open URI, or by setting environment `SQLITE_WEB_LOG=1` in the environment. The log level can be set to 0 to suppress all standard error logging, or increased up to 5 for individual request/response logging.
 
 To disable TLS certificate and hostname verification, set `&web_insecure=1` or `SQLITE_WEB_INSECURE=1`.
+
+### Basic optimization
+
+SQLite reads one small page at a time (default 4 KiB), which would be inefficient to serve with HTTP requests one-to-one. Instead, the extension adaptively consolidates page fetching into larger HTTP requests, and concurrently reads ahead on background threads. This works well for point lookups and queries that scan largely-contiguous slices of tables and indexes (and a modest number thereof). It's less suitable for big multi-way joins and other aggressively random access patterns; in those cases, it's better to download the database file upfront to open locally.
+
+Readers should enlarge their [page cache](https://www.sqlite.org/pragma.html#pragma_cache_size) capacity as much as feasible, while budgeting an additional ~640 MiB RAM for the extension's prefetch buffers. (That ought to be enough for anybody.)
+
+To optimize a database file to be served over the web, write it with the largest possible [page size](https://www.sqlite.org/pragma.html#pragma_page_size) of 64 KiB, and [VACUUM](https://sqlite.org/lang_vacuum.html) it once the contents are finalized. These steps minimize the random accesses needed for queries.
+
+### Advanced optimization: .dbi helper files
+
+To further improve the random access pattern, the extension can utilize a small .dbi file served alongside the main database file. This .dbi file is never required, but often helpful for queries accessing any substantial portion of a large database from outside the same datacenter.
+
+Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (Increase `web_log` to 3 or higher to see which mode is used.) You can set `&web_dbi_url=` to a different, percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi`. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable .dbi mode entirely.
+
+The included [`sqlite_web_dbi.py`](sqlite_web_dbi.py) utility generates the .dbi helper for a SQLite database file given on the command line. If the database file is subsequently written to, any previous .dbi must be discarded. (The extension makes a reasonable effort to detect if a .dbi isn't up-to-date and fall back to non-dbi mode, but this cannot be guaranteed.)
+
+The .dbi file contains a copy of small portions of the main database file that are key for navigating within, but typically scattered throughout (even after vacuum). These include the interior nodes of SQLite's b-trees, and various metadata tables. By prefetching them *en masse* in the compact .dbi, the client may save numerous chains of small, random requests to collect them from the main database file.

@@ -2,19 +2,20 @@
 """
 Creates a .dbi index file to accelerate web access for an immutable SQLite database file.
 
-Identifies key pages of the main database file that readers use frequently:
-    - interior pages of all tables and indexes
-    - SQLite system tables
+Scans the database file to identify key pages that readers will use frequently:
     - first page
+    - SQLite system tables
+    - btree interior pages for all tables and indexes
 Copies these into a .dbi file, itself a small SQLite database (typically <1% of the full database,
-YMMV), with their original positions.
+YMMV), indexed by their original offsets.
 
 Those key pages are typically scattered all throughout the main database file (even after vacuum).
-Therefore, a reader with a prefetched .dbi file can significantly streamline their random access
-pattern for subsequent queries.
+Therefore, prefetching them by downloading the compact .dbi file can significantly streamline the
+subsequent random access patterns needed to answer queries.
 
-Consistency of the page data can be ensured within reason by checking that the SQLite header (the
-first 100 bytes of the main database file) matches that stored in the .dbi file (in pageno=1).
+Assuming both the main database and .dbi files are immutable, the consistency between them can be
+verified, within reason, by checking that the SQLite header (first 100 bytes of main database file)
+matches that stored in the .dbi file pageno=1.
 
 Background:
     https://www.sqlite.org/fileformat.html
@@ -136,7 +137,7 @@ def collect_pagenos_worker(inp):
     dbh = sqlite3.connect(dbfile)
     # ref: https://github.com/sqlite/sqlite/blob/master/src/dbstat.c
     query = "select pageno from dbstat where name=?"
-    if not btree.startswith("sqlite_"):
+    if not btree.startswith("sqlite_") or btree.startswith("sqlite_autoindex_"):
         # include all pages of sqlite system tables
         query += " and pagetype='internal'"
     pagenos = [row[0] for row in dbh.execute(query, (btree,))]
