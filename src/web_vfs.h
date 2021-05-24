@@ -5,6 +5,9 @@
 #include "ThreadPool.h"
 #include <future>
 #include <set>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace WebVFS {
 
