@@ -102,6 +102,7 @@ class File : public SQLiteVFS::File {
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
     std::unique_ptr<DBI> dbi_;
     const unsigned long log_level_ = 1;
+    const bool go_big_;
 
     // Extents cached for potential reuse, with a last-use timestamp for LRU eviction.
     // Note: The purpose of keeping extents cached is to anticipate future Read requests for nearby
@@ -386,13 +387,17 @@ class File : public SQLiteVFS::File {
             // needed extent not resident: front-enqueue job to fetch it
             Extent extent = Extent::Containing(offset, length);
             // promote up to medium if we already used the previous small or medium extent
-            Extent container = extent.Promote(), container2 = container.Promote();
+            Extent container = extent.Promote();
             if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
                 ResidentAndUsed(Extent(extent.size, extent.rank + 1)) ||
                 (container.rank > 0 &&
                  ResidentAndUsed(Extent(container.size, container.rank - 1))) ||
                 ResidentAndUsed(Extent(container.size, container.rank + 1))) {
                 extent = container;
+            }
+            if (go_big_) {
+                // &web_gobig=1 told us to skip straight to large requests
+                extent = container.Promote();
             }
             EnqueueFetch(lock, extent, true);
             // wait for it
@@ -555,9 +560,9 @@ class File : public SQLiteVFS::File {
   public:
     File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
          std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<DBI> &&dbi,
-         unsigned long log_level = 1)
+         unsigned long log_level = 1, bool go_big = false)
         : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
-          dbi_(std::move(dbi)), log_level_(log_level), threadpool_(4, 16) {
+          dbi_(std::move(dbi)), log_level_(log_level), go_big_(go_big), threadpool_(4, 16) {
         methods_.iVersion = 1;
     }
 };
@@ -598,6 +603,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 insecure = true;
             }
         }
+        bool go_big = sqlite3_uri_boolean(zName, "web_gobig", 0);
         bool no_dbi = sqlite3_uri_boolean(zName, "web_nodbi", 0);
         const char *env_nodbi = getenv("SQLITE_WEB_NODBI");
         if (env_nodbi && *env_nodbi) {
@@ -709,7 +715,7 @@ class VFS : public SQLiteVFS::Wrapper {
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
             auto webfile = new File(uri, FileNameForLog(uri), file_size, std::move(curlpool),
-                                    std::move(dbi), log_level);
+                                    std::move(dbi), log_level, go_big);
             webfile->InitHandle(pFile);
             *pOutFlags = flags;
             return SQLITE_OK;

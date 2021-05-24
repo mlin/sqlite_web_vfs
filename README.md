@@ -68,9 +68,9 @@ To optimize a database file to be served over the web, write it with the largest
 
 ### Advanced optimization: .dbi helper files
 
-To further improve the random access pattern, the extension can utilize a small .dbi file served alongside the main database file. This .dbi file is never required, but often helpful for queries accessing any substantial portion of a large database from outside the same datacenter.
+To further streamline the random access pattern, the extension can utilize a small .dbi file served alongside the main database file. This .dbi file is never required, but often helpful for queries accessing some substantial portion of a large database from outside the same datacenter. (Conversely, it may be neutral/harmful for lone point queries on low-latency connections.)
 
-Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (Increase `web_log` to 3 or higher to see which mode is used.) You can set `&web_dbi_url=` to a different, percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi`. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable .dbi mode entirely.
+Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (Increase log level to 3 or higher to see which mode is used.) You can set `&web_dbi_url=` to a different, percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi`. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable .dbi mode entirely.
 
 The included [`sqlite_web_dbi.py`](sqlite_web_dbi.py) utility generates the .dbi helper for a SQLite database file given on the command line. If the database file is subsequently written to, any previous .dbi must be discarded. (The extension makes a reasonable effort to detect if a .dbi isn't up-to-date and fall back to non-dbi mode, but this cannot be guaranteed.)
 
