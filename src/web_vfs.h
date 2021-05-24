@@ -601,9 +601,10 @@ class VFS : public SQLiteVFS::Wrapper {
             }
             curlpool->checkin(conn);
 
-            long long file_size = sqlite3_uri_int64(zName, "web_content_length", -1);
+            long long file_size = -1;
+            std::string db_header;
             if (file_size <= 0) {
-                rc = DetectFileSize(uri, curlpool.get(), log_level, file_size);
+                rc = FetchDatabaseHeader(uri, curlpool.get(), log_level, file_size, db_header);
                 if (rc != SQLITE_OK) {
                     return rc;
                 }
@@ -647,16 +648,17 @@ class VFS : public SQLiteVFS::Wrapper {
         return ans;
     }
 
-    int DetectFileSize(const std::string &uri, HTTP::CURLpool *connpool, unsigned long log_level,
-                       long long &ans) {
-        // GET range: bytes=0-0 to determine the database file's existence & size.
-        // This is instead of HEAD for compatibility with "presigned" URLs that can only
-        // be used for GET.
+    int FetchDatabaseHeader(const std::string &uri, HTTP::CURLpool *connpool,
+                            unsigned long log_level, long long &db_file_size,
+                            std::string &db_header) {
+        // GET range: bytes=0-99 to read the database file's header and detect its size.
+        db_file_size = -1;
+        db_header.clear();
         Timer t;
         const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP",
                           filename = FileNameForLog(uri);
         HTTP::headers reqhdrs, reshdrs;
-        reqhdrs["range"] = "bytes=0-0";
+        reqhdrs["range"] = "bytes=0-99";
 
         if (log_level > 4) {
             cerr << "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ..."
@@ -667,10 +669,9 @@ class VFS : public SQLiteVFS::Wrapper {
         long status = -1;
         HTTP::RetryOptions options;
         options.connpool = connpool;
-        std::string empty;
-        CURLcode rc = HTTP::RetryGet(uri, reqhdrs, status, reshdrs, empty, options);
+        CURLcode rc = HTTP::RetryGet(uri, reqhdrs, status, reshdrs, db_header, options);
         if (rc != CURLE_OK) {
-            last_error_ = "[" + filename + "] " + protocol + " file size detection: ";
+            last_error_ = "[" + filename + "] reading database header: ";
             last_error_ += curl_easy_strerror(rc);
             if (log_level) {
                 cerr << last_error_ << endl << flush;
@@ -678,16 +679,23 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_IOERR_READ;
         }
         if (status < 200 || status >= 300) {
-            last_error_ = "[" + filename + "] " + protocol +
-                          " file size detection: error status = " + std::to_string(status);
+            last_error_ = "[" + filename +
+                          "] reading database header: error status = " + std::to_string(status);
             if (log_level) {
                 cerr << last_error_ << endl << flush;
             }
             return SQLITE_CANTOPEN;
         }
+        if (db_header.size() != 100 ||
+            db_header.substr(0, 16) != std::string("SQLite format 3\000", 16)) {
+            last_error_ = "[" + filename + "] remote content isn't a SQLite3 database file";
+            if (log_level) {
+                cerr << last_error_ << endl << flush;
+            }
+            return SQLITE_CORRUPT;
+        }
 
         // parse content-range
-        long long file_size = -1;
         auto size_it = reshdrs.find("content-range");
         if (size_it != reshdrs.end()) {
             if (log_level > 4) {
@@ -703,28 +711,49 @@ class VFS : public SQLiteVFS::Wrapper {
                     const char *size_str = size_txt.c_str();
                     char *endptr = nullptr;
                     errno = 0;
-                    file_size = strtoll(size_str, &endptr, 10);
-                    if (errno || endptr != size_str + size_txt.size() || file_size < 0) {
-                        file_size = -1;
+                    db_file_size = strtoll(size_str, &endptr, 10);
+                    if (errno || endptr != size_str + size_txt.size() || db_file_size < 0) {
+                        db_file_size = -1;
                     }
                 }
             }
         }
-        if (file_size < 0) {
+        if (db_file_size < 0) {
             last_error_ = "[" + filename + "] " + protocol +
-                          " GET bytes=0-0: response lacking valid content-range header "
-                          "specifying file size";
+                          " GET bytes=0-99: response lacking valid content-range header "
+                          "providing file size";
             if (log_level) {
                 cerr << last_error_ << endl << flush;
             }
             return SQLITE_IOERR_READ;
         }
+
+        // read the page size & page count from the header; their product should equal file size.
+        // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
+        uint32_t page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
+        if (page_size == 1) {
+            page_size = 65536;
+        }
+        uint32_t page_count = 0;
+        for (int ofs = 28; ofs < 32; ++ofs) {
+            page_count <<= 8;
+            page_count += uint8_t(db_header[ofs]);
+        }
         if (log_level > 3) {
-            cerr << "[" << filename << "] " << protocol << " file size detected: " << file_size
-                 << " (" << (t.micros() / 1000) << "ms)" << endl
+            cerr << "[" << filename << "] database geometry detected: " << db_file_size
+                 << " bytes = " << page_size << " bytes/page * " << page_count << " pages ("
+                 << (t.micros() / 1000) << "ms)" << endl
                  << flush;
         }
-        ans = file_size;
+        if (db_file_size != (long long)page_size * (long long)page_count) {
+            last_error_ = "[" + filename +
+                          "] database corrupt or truncated; content-range file size doesn't "
+                          "match in-header database size";
+            if (log_level) {
+                cerr << last_error_ << endl << flush;
+            }
+            return SQLITE_CORRUPT;
+        }
         return SQLITE_OK;
     }
 };
