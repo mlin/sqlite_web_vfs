@@ -70,7 +70,9 @@ To optimize a database file to be served over the web, write it with the largest
 
 To further streamline the access pattern, the extension can utilize a small .dbi file served alongside the main database file. This .dbi file is never required, but often helpful for accessing any appreciable portion of a large database from outside the same datacenter. (Conversely, it may be neutral/harmful for single point queries on low-latency connections.)
 
-Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (Increase log level to 3 or higher to see which mode is used.) Override `&web_dbi_url=` to a percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi` if available. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable this entirely.
+Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (ncrease log level to 3 or higher to see which mode is used.
+
+Override `&web_dbi_url=` to a percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi` if available. Or set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable this entirely.
 
 The included [`sqlite_web_dbi.py`](sqlite_web_dbi.py) utility generates the .dbi helper for a SQLite database file given on the command line. If the database file is subsequently changed, any previous .dbi must be discarded. (The extension makes a reasonable effort to detect out-of-date .dbi and fall back to non-dbi mode, but this cannot be guaranteed.)
 
