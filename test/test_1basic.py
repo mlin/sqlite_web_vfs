@@ -7,7 +7,7 @@ import pytest
 HERE = os.path.dirname(__file__)
 BUILD = os.path.abspath(os.path.join(HERE, "..", "build"))
 CHINOOK_URI = "https://github.com/lerocha/chinook-database/raw/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite"
-TPCH_URI = "https://github.com/lovasoa/TPCH-sqlite/releases/download/v1.0/TPC-H.db"
+TPCH_URI = "https://github.com/mlin/sqlite_web_vfs/releases/download/test-db-v1/TPC-H.db"
 TPCH_SIZE = 1252864000
 
 
