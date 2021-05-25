@@ -52,7 +52,10 @@ def main(argv):
     # read basic db info
     header = read_db_header(args.dbfile)
     dbfile_mtime = os.stat(args.dbfile).st_mtime
+    dbfile_size = os.path.getsize(args.dbfile)
     page_size, btrees = read_db_btrees(args.dbfile)
+    assert not (dbfile_size % page_size)
+    last_pageno = dbfile_size // page_size
 
     if not btrees:
         print(f"[WARN] database appears to be empty", file=sys.stderr)
@@ -79,7 +82,11 @@ def main(argv):
 
     # identify the desired pages
     desired_pagenos = collect_pagenos(args.dbfile, btrees)
-    desired_pagenos.add(1)
+    # spike in the first & last 64 KiB worth of pages
+    for i in range(1, min(last_pageno, 65536 // page_size)):
+        desired_pagenos.add(i)
+    for i in range(max(1, last_pageno - 65536 // page_size + 1), last_pageno + 1):
+        desired_pagenos.add(i)
     print(f"pages to copy: {len(desired_pagenos):,}", file=sys.stderr)
     sys.stderr.flush()
 
@@ -88,7 +95,9 @@ def main(argv):
         write_dbi(args.dbfile, page_size, desired_pagenos, args.dbifile)
         # check database file hasn't been modified
         assert (
-            os.stat(args.dbfile).st_mtime == dbfile_mtime and read_db_header(args.dbfile) == header
+            os.stat(args.dbfile).st_mtime == dbfile_mtime
+            and os.path.getsize(args.dbfile) == dbfile_size
+            and read_db_header(args.dbfile) == header
         ), "Database file was concurrently modified"
     except:
         try:
@@ -193,7 +202,7 @@ def write_dbi(dbfile, page_size, pagenos, dbifile):
             )
 
             for pageno in pagenos:
-                assert pageno > 0
+                assert 0 < pageno <= (dbfile_size // page_size)
                 ofs = (pageno - 1) * page_size
                 assert ofs + page_size <= dbfile_size
                 cursor.seek(ofs)
