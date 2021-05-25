@@ -68,7 +68,7 @@ To optimize a database file to be served over the web, write it with the largest
 
 ### Advanced optimization: helper .dbi files
 
-To further streamline the access pattern, the extension can utilize a small .dbi helper file served alongside the main database file. Opening a given `web_url`, the extension automatically probes for it by appending `.dbi` to the URL (unless it has a query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. Increase the log level to 3 or higher to see which mode is used. 
+To further streamline the access pattern, the extension can utilize a small .dbi helper file served alongside the main database file. Opening a given `web_url`, the extension automatically probes for it by appending `.dbi` to the URL (unless it has a query string). If that can't be downloaded for any reason, main database access falls back to non-dbi mode. Increase the log level to 3 or higher to see which mode is used. 
 
 The automatic probe can be overridden by setting `&web_dbi_url=` to different percent-encoded URL for the .dbi file, or to a local `file:/path/to.dbi` downloaded beforehand. Use the latter approach to save multiple connections from each having to fetch the .dbi separately. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable this feature entirely.
 
