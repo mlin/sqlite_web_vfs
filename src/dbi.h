@@ -54,6 +54,7 @@ class dbiHelper {
             error = sqlite3_errmsg(dbiconn_.get());
             return rc;
         }
+        // TODO: check pragma application_id = 0x646269;
         sqlite3_stmt *raw_get_page = nullptr;
         rc = sqlite3_prepare_v3(dbiconn_.get(), "select data from web_dbi_pages where offset = ?",
                                 -1, 0, &raw_get_page, nullptr);

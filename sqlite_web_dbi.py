@@ -174,11 +174,11 @@ def write_dbi(dbfile, page_size, pagenos, dbifile):
         dbih = sqlite3.connect(dbifile)
         stack.callback(lambda dbih: dbih.close(), dbih)
 
-        # application_id = "DBI"
+        # application_id = "dbi"
         # small page size minimizes bin-packing overhead to store blobs of comparable size
         dbih.executescript(
             """
-            pragma application_id = 0x444249;
+            pragma application_id = 0x646269;
             pragma page_size = 1024;
             pragma locking_mode = EXCLUSIVE
             """
