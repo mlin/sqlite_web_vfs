@@ -15,7 +15,7 @@ using std::cerr;
 using std::endl;
 using std::flush;
 
-#include "DBI.h"
+#include "dbi.h"
 
 class Timer {
     unsigned long long t0_;
@@ -103,7 +103,7 @@ class File : public SQLiteVFS::File {
     const std::string uri_, filename_;
     const sqlite_int64 file_size_;
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
-    std::unique_ptr<DBI> dbi_;
+    std::unique_ptr<dbiHelper> dbi_;
     const unsigned long log_level_ = 1;
     const bool go_big_;
 
@@ -562,7 +562,7 @@ class File : public SQLiteVFS::File {
 
   public:
     File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
-         std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<DBI> &&dbi,
+         std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<dbiHelper> &&dbi,
          unsigned long log_level = 1, bool go_big = false)
         : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
           dbi_(std::move(dbi)), log_level_(log_level), go_big_(go_big), threadpool_(4, 16) {
@@ -665,11 +665,12 @@ class VFS : public SQLiteVFS::Wrapper {
                 dbi_uri = uri + ".dbi";
             }
             std::future<int> dbi_fut;
-            std::unique_ptr<DBI> dbi;
+            std::unique_ptr<dbiHelper> dbi;
             std::string dbi_error;
             if (!dbi_uri.empty()) {
                 dbi_fut = std::async(std::launch::async, [&] {
-                    return DBI::Open(conn.get(), dbi_uri, insecure, log_level, dbi, dbi_error);
+                    return dbiHelper::Open(conn.get(), dbi_uri, insecure, log_level, dbi,
+                                           dbi_error);
                 });
             }
 

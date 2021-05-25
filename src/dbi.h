@@ -1,11 +1,11 @@
 #pragma once
 
-class DBI {
+class dbiHelper {
     std::shared_ptr<sqlite3> dbiconn_ = nullptr;
     std::shared_ptr<sqlite3_stmt> cursor_;
     std::string temp_dbifile_, last_error_;
 
-    DBI(std::shared_ptr<sqlite3> dbiconn) : dbiconn_(dbiconn) {}
+    dbiHelper(std::shared_ptr<sqlite3> dbiconn) : dbiconn_(dbiconn) {}
 
     int Prepare(bool web, std::string &error) noexcept {
         int rc;
@@ -24,6 +24,8 @@ class DBI {
             }
             close(rc);
 
+            // download from web_vfs by VACUUM INTO, which buys us parallel, chunked downloads
+            // with retry logic!
             auto vacuum_sql = "vacuum into '" + temp_dbifile_ + "'";
             rc = sqlite3_exec(dbiconn_.get(), vacuum_sql.c_str(), nullptr, nullptr, nullptr);
             if (rc != SQLITE_OK) {
@@ -65,6 +67,7 @@ class DBI {
 
     /*
     ** Originally from sqlite os_unix.c:
+    **
     ** Return the name of a directory in which to put temporary files.
     ** If no suitable temporary file directory can be found, return NULL.
     */
@@ -91,7 +94,7 @@ class DBI {
     }
 
   public:
-    virtual ~DBI() {
+    virtual ~dbiHelper() {
         dbiconn_.reset();
         if (!temp_dbifile_.empty()) {
             unlink(temp_dbifile_.c_str());
@@ -99,7 +102,7 @@ class DBI {
     }
 
     static int Open(HTTP::CURLconn *curlconn, const std::string &dbi_url, bool web_insecure,
-                    int web_log, std::unique_ptr<DBI> &dbi, std::string &error) noexcept {
+                    int web_log, std::unique_ptr<dbiHelper> &dbi, std::string &error) noexcept {
         error.clear();
 
         bool web = true;
@@ -108,6 +111,8 @@ class DBI {
             open_uri = dbi_url + open_uri;
             web = false;
         } else {
+            // Open .dbi through web_vfs. This is quite tricky and cute: the process of opening one
+            // web_vfs db file triggers opening another. (&web_nodbi=1 prevents infinite recursion)
             std::string encoded_url;
             if (!curlconn->escape(dbi_url, encoded_url) || encoded_url.size() < dbi_url.size()) {
                 error = "Failed percent-encoding dbi_url";
@@ -130,7 +135,7 @@ class DBI {
             error = sqlite3_errstr(rc);
             return rc;
         }
-        dbi.reset(new DBI(std::shared_ptr<sqlite3>(raw_dbiconn, sqlite3_close_v2)));
+        dbi.reset(new dbiHelper(std::shared_ptr<sqlite3>(raw_dbiconn, sqlite3_close_v2)));
         rc = dbi->Prepare(web, error);
         if (rc != SQLITE_OK) {
             dbi.reset();

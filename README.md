@@ -68,12 +68,10 @@ To optimize a database file to be served over the web, write it with the largest
 
 ### Advanced optimization: helper .dbi files
 
-To further streamline the access pattern, the extension can utilize a small .dbi file served alongside the main database file. This .dbi file is never required, but often helpful for accessing any appreciable portion of a large database from outside the same datacenter. (Conversely, it may be neutral/harmful for single point queries on low-latency connections.)
+To further streamline the access pattern, the extension can utilize a small .dbi helper file served alongside the main database file. Opening a given `web_url`, the extension automatically probes by appending `.dbi` to the URL (unless it has a query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. Increase the log level to 3 or higher to see which mode is used. 
 
-Opening a given `web_url`, the extension automatically probes for this helper file by appending `.dbi` to the URL (so long as it has no query string). If it doesn't find that for any reason, main database access falls back to non-dbi mode. (ncrease log level to 3 or higher to see which mode is used.
+The automatic probe can be overridden by setting `&web_dbi_url=` to different percent-encoded URL for the .dbi file, or to a local `file:/path/to.dbi` downloaded beforehand. Use the latter approach to save multiple connections from each having to fetch the .dbi separately. Lastly, set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable this feature entirely.
 
-Override `&web_dbi_url=` to a percent-encoded URL for the .dbi file if needed, including a local `file:/path/to.dbi` if available. Or set `&web_nodbi=1` or `SQLITE_WEB_NODBI=1` to disable this entirely.
+The included [`sqlite_web_dbi.py`](sqlite_web_dbi.py) utility generates the .dbi helper for a SQLite database file given on the command line. If the main database file is subsequently changed, any previous .dbi must be discarded. (The extension makes a reasonable effort to detect out-of-date .dbi and fall back to non-dbi mode, but this cannot be guaranteed.)
 
-The included [`sqlite_web_dbi.py`](sqlite_web_dbi.py) utility generates the .dbi helper for a SQLite database file given on the command line. If the database file is subsequently changed, any previous .dbi must be discarded. (The extension makes a reasonable effort to detect out-of-date .dbi and fall back to non-dbi mode, but this cannot be guaranteed.)
-
-The .dbi file copies small portions of the main database file that are key for navigating within, but typically scattered throughout (even after vacuum). These include interior nodes of SQLite's b-trees, and various metadata tables. By prefetching them all in the compact .dbi, the client may elide sequences of scattered requests to collect them from the main file.
+The .dbi helper is never required, but often helpful for accessing a large database with high request latencies. It copies small portions of the main database file that are key for navigating within, but typically scattered throughout (even after vacuum). These include interior nodes of SQLite's b-trees, and various metadata tables. By prefetching them in the compact .dbi, the reader may elide sequences of scattered requests to collect them from the main file.

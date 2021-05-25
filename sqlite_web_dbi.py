@@ -149,8 +149,11 @@ def collect_pagenos_worker(inp):
     dbh = sqlite3.connect(dbfile)
     # ref: https://github.com/sqlite/sqlite/blob/master/src/dbstat.c
     query = "select pageno from dbstat where name=?"
-    if not btree.startswith("sqlite_") or btree.startswith("sqlite_autoindex_"):
-        # include all pages of sqlite system tables
+    if not (
+        btree.startswith("sqlite_") or btree.endswith("pages_btree_interior")
+    ) or btree.startswith("sqlite_autoindex_"):
+        # include all pages of sqlite system tables, and sqlite_zstd_vfs' index of its own nested
+        # btree interior pages
         query += " and pagetype='internal'"
     pagenos = [row[0] for row in dbh.execute(query, (btree,))]
     dbh.close()
