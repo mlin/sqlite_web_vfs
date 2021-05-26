@@ -36,13 +36,20 @@ def main(argv):
         prog=os.path.basename(argv[0]),
         description="Create .dbi index file to accelerate web access for an immutable SQLite database",
     )
-    parser.add_argument("dbfile", type=str, help="immutable SQLite database filename")
+    parser.add_argument(
+        "dbfile",
+        type=str,
+        metavar="DBFILE",
+        help="immutable SQLite database filename"
+        if __package__ != "genomicsqlite"
+        else argparse.SUPPRESS,
+    )
     parser.add_argument(
         "-o",
         dest="dbifile",
         type=str,
         default=None,
-        help="output .dbi filename (default: dbfile.dbi)",
+        help="output .dbi filename (default: DBFILE.dbi)",
     )
     parser.add_argument(
         "-f", "--force", action="store_true", help="remove existing output .dbi file, if any"
