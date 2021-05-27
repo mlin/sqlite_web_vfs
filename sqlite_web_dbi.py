@@ -99,7 +99,7 @@ def main(argv):
 
     try:
         # write .dbi file
-        write_dbi(args.dbfile, page_size, desired_pagenos, args.dbifile)
+        write_dbi(args.dbfile, page_size, btrees, desired_pagenos, args.dbifile)
         # check database file hasn't been modified
         assert (
             os.stat(args.dbfile).st_mtime == dbfile_mtime
@@ -166,7 +166,9 @@ def collect_pagenos_worker(inp):
     # ref: https://github.com/sqlite/sqlite/blob/master/src/dbstat.c
     query = "select pageno from dbstat where name=?"
     if not (
-        btree.startswith("sqlite_") or btree.endswith("pages_btree_interior")
+        btree.startswith("sqlite_")
+        or btree.endswith("pages_btree_interior")
+        or btree.endswith("pages_btree_interior_pageno")
     ) or btree.startswith("sqlite_autoindex_"):
         # include all pages of sqlite system tables, and sqlite_zstd_vfs' index of its own nested
         # btree interior pages
@@ -176,7 +178,7 @@ def collect_pagenos_worker(inp):
     return pagenos
 
 
-def write_dbi(dbfile, page_size, pagenos, dbifile):
+def write_dbi(dbfile, page_size, btrees, pagenos, dbifile):
     "generate .dbi file, copying the content of the given page numbers"
 
     with contextlib.ExitStack() as stack:
@@ -217,7 +219,9 @@ def write_dbi(dbfile, page_size, pagenos, dbifile):
                 assert len(pagedata) == page_size
                 dbih.execute("insert into web_dbi_pages(offset,data) values(?,?)", (ofs, pagedata))
 
-            for kv in [("page_size", page_size), ("dbfile_size", dbfile_size)]:
+            for kv in [("page_size", page_size), ("dbfile_size", dbfile_size)] + [
+                ("main." + btree, None) for btree in btrees
+            ]:
                 dbih.execute("insert into web_dbi_meta(key,value) values(?,?)", kv)
 
         dbih.executescript("vacuum")
