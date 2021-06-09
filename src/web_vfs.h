@@ -697,15 +697,15 @@ class VFS : public SQLiteVFS::Wrapper {
             }
 
             // read main database header
-            long long file_size = -1;
+            unsigned long long file_size = 0, page_size = 0;
             std::string db_header;
-            if (file_size <= 0) {
-                rc = FetchDatabaseHeader(uri, curlpool.get(), log_level, file_size, db_header);
-                if (rc != SQLITE_OK) {
-                    return rc;
-                }
-                assert(file_size >= 0);
+            rc = FetchDatabaseHeader(uri, curlpool.get(), log_level, file_size, page_size,
+                                     db_header);
+            if (rc != SQLITE_OK) {
+                return rc;
             }
+            // WebVFS::File logic assumes small extent is at least 1 page
+            small_KiB = std::max(1LL, std::max((long long)page_size / 1024LL, small_KiB));
 
             // collect result of .dbi sniff
             int dbi_rc = SQLITE_NOTFOUND;
@@ -777,10 +777,10 @@ class VFS : public SQLiteVFS::Wrapper {
     }
 
     int FetchDatabaseHeader(const std::string &uri, HTTP::CURLpool *connpool,
-                            unsigned long log_level, long long &db_file_size,
-                            std::string &db_header) {
+                            unsigned long log_level, unsigned long long &db_file_size,
+                            unsigned long long &page_size, std::string &db_header) {
         // GET range: bytes=0-99 to read the database file's header and detect its size.
-        db_file_size = -1;
+        db_file_size = page_size = 0;
         db_header.clear();
         Timer t;
         const std::string protocol = uri.substr(0, 6) == "https:" ? "HTTPS" : "HTTP",
@@ -839,17 +839,16 @@ class VFS : public SQLiteVFS::Wrapper {
                     const char *size_str = size_txt.c_str();
                     char *endptr = nullptr;
                     errno = 0;
-                    db_file_size = strtoll(size_str, &endptr, 10);
-                    if (errno || endptr != size_str + size_txt.size() || db_file_size < 0) {
-                        db_file_size = -1;
+                    db_file_size = strtoull(size_str, &endptr, 10);
+                    if (errno || endptr != size_str + size_txt.size()) {
+                        db_file_size = 0;
                     }
                 }
             }
         }
-        if (db_file_size < 0) {
+        if (!db_file_size) {
             last_error_ = "[" + filename + "] " + protocol +
-                          " GET bytes=0-99: response lacking valid content-range header "
-                          "providing file size";
+                          " GET bytes=0-99: empty file or invalid content-range header";
             if (log_level) {
                 cerr << last_error_ << endl << flush;
             }
@@ -858,7 +857,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
         // read the page size & page count from the header; their product should equal file size.
         // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
-        uint32_t page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
+        page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
         if (page_size == 1) {
             page_size = 65536;
         }
@@ -873,7 +872,8 @@ class VFS : public SQLiteVFS::Wrapper {
                  << (t.micros() / 1000) << "ms)" << endl
                  << flush;
         }
-        if (db_file_size != (long long)page_size * (long long)page_count) {
+        if (page_size < 512 || page_size > 65536 || page_count == 0 ||
+            db_file_size != page_size * page_count) {
             last_error_ = "[" + filename +
                           "] database corrupt or truncated; content-range file size doesn't "
                           "match in-header database size";
