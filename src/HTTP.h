@@ -157,6 +157,7 @@ class CURLpool {
     bool insecure_;
     std::queue<std::unique_ptr<CURLconn>> pool_;
     std::mutex mu_;
+    unsigned int cumulative_connections_ = 0;
 
   public:
     CURLpool(const unsigned int size, bool insecure = false) : size_(size), insecure_(insecure) {}
@@ -166,6 +167,7 @@ class CURLpool {
         std::unique_ptr<CURLconn> ans;
         if (pool_.empty()) {
             ans.reset(new CURLconn(insecure_));
+            ++cumulative_connections_;
         } else {
             ans.reset(pool_.front().release());
             pool_.pop();
@@ -181,6 +183,8 @@ class CURLpool {
             p.reset();
         }
     }
+
+    unsigned int cumulative_connections() const { return cumulative_connections_; }
 };
 
 using headers = std::map<std::string, std::string>;

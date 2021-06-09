@@ -39,42 +39,48 @@ class Timer {
 struct Extent {
     enum Size { SM, MD, LG };
 
+    size_t small_KiB;
     Size size;
     size_t rank;
 
-    static size_t Bytes(Size sz) {
+    static size_t Bytes(Size sz, size_t small_KiB) {
         switch (sz) {
         case Size::SM:
-            return 65536;
+            return small_KiB << 10;
         case Size::MD:
-            return 1048576;
+            return small_KiB << 14;
         default:
             break;
         }
-        return 16777216;
+        return small_KiB << 18;
     }
 
-    static Extent Containing(uint64_t offset, size_t length) {
-        auto rk = offset / Bytes(Size::SM);
-        auto hi = offset + std::max(length, size_t(1)) - 1;
-        if (rk == hi / Bytes(Size::SM)) {
-            return Extent(Size::SM, rk);
-        }
-        throw std::runtime_error("unaligned Read");
-    }
+    Extent(Size size_, size_t rank_, size_t small_KiB_)
+        : small_KiB(small_KiB_), size(size_), rank(rank_) {}
+    Extent() : small_KiB(64), size(Size::SM), rank(0) {} // don't use; for STL
 
-    Extent() : size(Size::SM), rank(0) {}
-    Extent(Size size_, size_t rank_) : size(size_), rank(rank_) {}
+    size_t Bytes(Size sz) const { return Bytes(sz, small_KiB); }
+
     bool operator<(const Extent &rhs) const {
+        assert(rhs.small_KiB == small_KiB);
         return size < rhs.size || (size == rhs.size && rank < rhs.rank);
     }
 
+    Extent Prev() const {
+        if (rank == 0) {
+            throw std::runtime_error("illegal Extent::Prev()");
+        }
+        return Extent(size, rank - 1, small_KiB);
+    }
+
+    Extent Next() const { return Extent(size, rank + 1, small_KiB); }
+
     Extent Promote() const {
         if (size == Size::SM) {
-            return Extent(Size::MD, rank / 16);
+            return Extent(Size::MD, rank / 16, small_KiB);
         }
         if (size == Size::MD) {
-            return Extent(Size::LG, rank / 16);
+            return Extent(Size::LG, rank / 16, small_KiB);
         }
         return *this;
     }
@@ -102,10 +108,10 @@ struct Extent {
 class File : public SQLiteVFS::File {
     const std::string uri_, filename_;
     const sqlite_int64 file_size_;
+    const size_t small_KiB_;
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
     std::unique_ptr<dbiHelper> dbi_;
     const unsigned long log_level_ = 1;
-    const bool go_big_;
 
     // Extents cached for potential reuse, with a last-use timestamp for LRU eviction.
     // Note: The purpose of keeping extents cached is to anticipate future Read requests for nearby
@@ -338,8 +344,17 @@ class File : public SQLiteVFS::File {
         }
     }
 
+    Extent ExtentContaining(uint64_t offset, size_t length) {
+        auto rk = offset / Extent::Bytes(Extent::Size::SM, small_KiB_);
+        auto hi = offset + std::max(length, size_t(1)) - 1;
+        if (rk == hi / Extent::Bytes(Extent::Size::SM, small_KiB_)) {
+            return Extent(Extent::Size::SM, rk, small_KiB_);
+        }
+        throw std::runtime_error("unaligned Read");
+    }
+
     std::map<Extent, ResidentExtent>::iterator FindResidentExtent(uint64_t offset, size_t length) {
-        Extent extent = Extent::Containing(offset, length), extent2 = extent.Promote(),
+        Extent extent = ExtentContaining(offset, length), extent2 = extent.Promote(),
                extent3 = extent2.Promote();
         // prefer largest
         auto line = resident_.find(extent3);
@@ -388,19 +403,14 @@ class File : public SQLiteVFS::File {
 
         if (line == resident_.end()) {
             // needed extent not resident: front-enqueue job to fetch it
-            Extent extent = Extent::Containing(offset, length);
+            Extent extent = ExtentContaining(offset, length);
             // promote up to medium if we already used the previous small or medium extent
             Extent container = extent.Promote();
-            if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
-                ResidentAndUsed(Extent(extent.size, extent.rank + 1)) ||
-                (container.rank > 0 &&
-                 ResidentAndUsed(Extent(container.size, container.rank - 1))) ||
-                ResidentAndUsed(Extent(container.size, container.rank + 1))) {
+            if ((extent.rank > 0 && ResidentAndUsed(extent.Prev())) ||
+                ResidentAndUsed(extent.Next()) ||
+                (container.rank > 0 && ResidentAndUsed(container.Prev())) ||
+                ResidentAndUsed(container.Next())) {
                 extent = container;
-            }
-            if (go_big_) {
-                // &web_gobig=1 told us to skip straight to large requests
-                extent = container.Promote();
             }
             EnqueueFetch(lock, extent, true);
             // wait for it
@@ -430,28 +440,30 @@ class File : public SQLiteVFS::File {
         if (extent.size < Extent::Size::LG) {
             // if we used the previous or next extent of the same size, initiate prefetch of the
             // next size up
-            if ((extent.rank > 0 && ResidentAndUsed(Extent(extent.size, extent.rank - 1))) ||
-                (ResidentAndUsed(Extent(extent.size, extent.rank + 1)))) {
+            if ((extent.rank > 0 && ResidentAndUsed(extent.Prev())) ||
+                (ResidentAndUsed(extent.Next()))) {
                 EnqueueFetch(lock, extent.Promote());
             }
         } else {
             // large size: prefetch up to 4 subsequent/preceding extents if we seem to have
             // momentum in a contiguous scan
-            for (int ofs = 1; ofs <= 4; ++ofs) {
-                if (extent.rank >= ofs &&
-                    ResidentAndUsed(Extent(Extent::Size::LG, extent.rank - ofs))) {
-                    Extent succ = Extent(Extent::Size::LG, extent.rank + ofs);
-                    if (succ.Exists(file_size_)) {
-                        EnqueueFetch(lock, succ);
-                    }
+            Extent pred = extent, succ = extent;
+            for (int ofs = 0; ofs < 4 && pred.rank; ++ofs) {
+                pred = pred.Prev();
+                succ = succ.Next();
+                if (ResidentAndUsed(pred) && succ.Exists(file_size_)) {
+                    EnqueueFetch(lock, succ);
                 } else {
                     break;
                 }
             }
-            for (int ofs = 1; ofs <= 4; ++ofs) {
-                if (extent.rank >= ofs &&
-                    ResidentAndUsed(Extent(Extent::Size::LG, extent.rank + ofs))) {
-                    EnqueueFetch(lock, Extent(Extent::Size::LG, extent.rank - ofs));
+            pred = extent;
+            succ = extent;
+            for (int ofs = 0; ofs < 4 && pred.rank; ++ofs) {
+                pred = pred.Prev();
+                succ = succ.Next();
+                if (ResidentAndUsed(succ)) {
+                    EnqueueFetch(lock, pred);
                 } else {
                     break;
                 }
@@ -525,7 +537,8 @@ class File : public SQLiteVFS::File {
                      << ", wasted: " << wasted_prefetch_count_
                      << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
                      << fetch_bytes_ << " / " << file_size_ << ", stalled for "
-                     << (stalled_micros_ / 1000) << "ms" << endl
+                     << (stalled_micros_ / 1000)
+                     << "ms; total connections: " << curlpool_->cumulative_connections() << endl
                      << flush;
             }
         }
@@ -563,9 +576,9 @@ class File : public SQLiteVFS::File {
   public:
     File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
          std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<dbiHelper> &&dbi,
-         unsigned long log_level = 1, bool go_big = false)
+         size_t small_KiB, unsigned long log_level = 1)
         : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
-          dbi_(std::move(dbi)), log_level_(log_level), go_big_(go_big), threadpool_(4, 16) {
+          dbi_(std::move(dbi)), log_level_(log_level), threadpool_(4, 16), small_KiB_(small_KiB) {
         methods_.iVersion = 1;
     }
 };
@@ -606,7 +619,16 @@ class VFS : public SQLiteVFS::Wrapper {
                 insecure = true;
             }
         }
-        bool go_big = sqlite3_uri_boolean(zName, "web_gobig", 0);
+        auto small_KiB = sqlite3_uri_int64(zName, "web_small_KiB", 64);
+        const char *env_small_KiB = getenv("SQLITE_WEB_SMALL_KIB");
+        if (env_small_KiB && *env_small_KiB) {
+            errno = 0;
+            long long env_small_KiB_i = strtoll(env_small_KiB, nullptr, 10);
+            if (errno == 0) {
+                small_KiB = env_small_KiB_i;
+            }
+        }
+        small_KiB = std::max(1LL, small_KiB);
         bool no_dbi = sqlite3_uri_boolean(zName, "web_nodbi", 0);
         const char *env_nodbi = getenv("SQLITE_WEB_NODBI");
         if (env_nodbi && *env_nodbi) {
@@ -720,7 +742,7 @@ class VFS : public SQLiteVFS::Wrapper {
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
             auto webfile = new File(uri, FileNameForLog(uri), file_size, std::move(curlpool),
-                                    std::move(dbi), log_level, go_big);
+                                    std::move(dbi), size_t(small_KiB), log_level);
             webfile->InitHandle(pFile);
             *pOutFlags = flags;
             return SQLITE_OK;

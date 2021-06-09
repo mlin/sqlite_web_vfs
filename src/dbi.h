@@ -125,7 +125,7 @@ class dbiHelper {
             if (web_insecure) {
                 open_uri += "&web_insecure=1";
             }
-            open_uri += "&web_gobig=1&web_log=" + std::to_string(web_log);
+            open_uri += "&web_small_KiB=1048576&web_log=" + std::to_string(web_log);
         }
 
         sqlite3 *raw_dbiconn = nullptr;
