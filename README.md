@@ -42,7 +42,7 @@ Requirements:
 * Linux or macOS
 * C++11 build system with CMake
 * SQLite3 and libcurl dev packages
-* (Tests only) python3 and pytest
+* (Tests only) python3, pytest, aria2, libmicrohttpd-dev
 
 ```
 cmake -DCMAKE_BUILD_TYPE=Release -B build . && cmake --build build -j8

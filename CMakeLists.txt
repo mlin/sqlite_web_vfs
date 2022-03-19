@@ -18,7 +18,7 @@ endif()
 FetchContent_Declare(
     concurrentqueue
     GIT_REPOSITORY  https://github.com/cameron314/readerwriterqueue.git
-    GIT_TAG         v1.0.3
+    GIT_TAG         v1.0.6
 )
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
@@ -40,7 +40,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_Declare(
         catch
         GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
-        GIT_TAG         v2.13.4
+        GIT_TAG         v2.13.8
     )
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
