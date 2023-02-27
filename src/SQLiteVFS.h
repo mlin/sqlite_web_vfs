@@ -6,7 +6,6 @@
 
 #include <assert.h>
 #include <iostream>
-#include <libgen.h>
 #include <memory>
 #include <string.h>
 #include <string>
@@ -85,9 +84,10 @@ class Logger : public std::ostream {
     int level_;
 };
 
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define SQLITE_VFS_LOG(msg_level, msg)                                                             \
     if (log_.level() >= msg_level) {                                                               \
-        log_ << '[' << basename(__FILE__) << ":" << __LINE__ << "] " << msg << std::endl;          \
+        log_ << '[' << __FILENAME__ << ":" << __LINE__ << "] " << msg << std::endl;                \
     }
 
 /**
