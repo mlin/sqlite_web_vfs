@@ -49,6 +49,6 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     include(CTest)
     enable_testing()
-    add_test(NAME pytest COMMAND env SQLITE_WEB_LOG=99 python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    add_test(NAME pytest COMMAND env SQLITE_VFS_LOG=99 python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test)
     add_test(NAME local_stress_test COMMAND local_stress_test)
 endif()

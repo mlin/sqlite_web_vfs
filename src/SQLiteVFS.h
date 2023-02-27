@@ -5,6 +5,7 @@
 #pragma once
 
 #include <assert.h>
+#include <iostream>
 #include <memory>
 #include <string.h>
 #include <string>
@@ -17,6 +18,79 @@ Omitted so that includer can choose whether to use sqlite3.h or sqlite3ext.h
 namespace SQLiteVFS {
 
 /**
+ * VFS logging helpers:
+ *
+ * In SQLiteVFS::File and SQLiteVFS::Base implementations, the macro
+ *
+ *   SQLITE_VFS_LOG(int level, message << for << cerr)
+ *
+ * logs the message to cerr if level is at least the active level. The active level is
+ * determined as follows:
+ *
+ *   1. SQLITE_VFS_LOG environment variable
+ *   2. vfs_log URI parameter (for URI-opened File)
+ *   3. When compiled in DEBUG mode, 5.
+ *   4. Otherwise 0 (but default can be overridden by implementation)
+ *
+ * Recommended levels: 1=error, 2=warning, 3=notice, 4=info, 5=debug.
+ */
+class Logger : public std::ostream {
+  public:
+    Logger(const char *zName = nullptr, const int DEFAULT_LEVEL = 0)
+        : std::ostream(std::cerr.rdbuf()) {
+        DetectLevel(zName, DEFAULT_LEVEL);
+    }
+
+    void DetectLevel(const char *zName = nullptr, const int DEFAULT_LEVEL = 0) {
+        int log_level = DEFAULT_LEVEL;
+#ifndef NDEBUG
+        log_level = 5;
+#endif
+
+        const char *env_log = getenv("SQLITE_VFS_LOG");
+        bool env_ok = false;
+        if (env_log && *env_log) {
+            errno = 0;
+            unsigned long env_log_level = strtoul(env_log, nullptr, 10);
+            if (errno == 0 && env_log_level != ULONG_MAX) {
+                log_level = env_log_level;
+                env_ok = true;
+            }
+        }
+
+        if (!env_ok && zName) {
+            auto uri_log_level = sqlite3_uri_int64(zName, "vfs_log", -1);
+            if (uri_log_level >= 0) {
+                log_level = (unsigned long)uri_log_level;
+            }
+        }
+
+        level_ = log_level;
+    }
+
+    template <typename T> Logger &operator<<(const T &t) {
+        std::cerr << t;
+        return *this;
+    }
+
+    Logger &operator<<(std::ostream &(*manip)(std::ostream &)) {
+        std::cerr << manip;
+        return *this;
+    }
+
+    int level() const { return level_; }
+
+  private:
+    int level_;
+};
+
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+#define SQLITE_VFS_LOG(msg_level, msg)                                                             \
+    if (log_.level() >= msg_level) {                                                               \
+        log_ << '[' << __FILENAME__ << ":" << __LINE__ << "] " << msg << std::endl;                \
+    }
+
+/**
  * Abstract base class for sqlite3_file implementations. VFS xOpen() implementations can
  * instantiate a subclass implementing all of the pure methods, then call InitHandle() to fill out
  * a sqlite3_file* Handle to hand back to the caller. The instance self-deletes upon xClose().
@@ -24,6 +98,7 @@ namespace SQLiteVFS {
 class File {
   protected:
     sqlite3_io_methods methods_;
+    Logger log_;
 
     virtual int Close() {
         delete this;
@@ -59,7 +134,7 @@ class File {
         File *this_;
     };
 
-    File() {
+    File(const char *zName) : log_(zName) {
         memset(&methods_, 0, sizeof(methods_));
         methods_.iVersion = 3; // subclasses may override to 2 or 1
     }
@@ -209,7 +284,8 @@ class FileWrapper : public File {
 
   public:
     // inner will be freed after xClose()
-    FileWrapper(const std::shared_ptr<sqlite3_file> &inner) : wrapped_(inner) {}
+    FileWrapper(const char *zName, int flags, const std::shared_ptr<sqlite3_file> &inner)
+        : File(zName), wrapped_(inner) {}
     virtual ~FileWrapper() noexcept = default;
 
     void InitHandle(sqlite3_file *pFile) noexcept override {
@@ -226,6 +302,7 @@ class Base {
   protected:
     sqlite3_vfs vfs_;
     std::string name_;
+    Logger log_;
 
     // subclass may increase if it needs a large Handle for some reason
     virtual size_t szOsFile() { return sizeof(File::Handle); }
@@ -372,7 +449,7 @@ class Wrapper : public Base {
     virtual std::unique_ptr<FileWrapper>
     NewFileWrapper(const char *zName, int flags,
                    const std::shared_ptr<sqlite3_file> &wrapped_file) {
-        return std::unique_ptr<FileWrapper>(new FileWrapper(wrapped_file));
+        return std::unique_ptr<FileWrapper>(new FileWrapper(zName, flags, wrapped_file));
     }
 
     // xOpen a FileWrapper
