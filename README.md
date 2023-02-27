@@ -54,7 +54,7 @@ The extension library is `build/web_vfs.so` or `build/web_vfs.dylib`.
 
 ### Configuration
 
-The VFS logs a message to standard error upon any fatally failed HTTP request, and requests that succeed after having to be retried. The latter can be suppressed by setting `&web_log=1` in the open URI, or by setting environment `SQLITE_WEB_LOG=1` in the environment. The log level can be set to 0 to suppress all standard error logging, or increased up to 5 for individual request/response logging.
+The VFS logs a message to standard error upon any fatally failed HTTP request, and requests that succeed after having to be retried. The latter can be suppressed by setting `&vfs_log=1` in the open URI, or by setting environment `SQLITE_VFS_LOG=1` in the environment. The log level can be set to 0 to suppress all standard error logging, or increased up to 5 for verbose request/response debug logging.
 
 To disable TLS certificate and hostname verification, set `&web_insecure=1` or `SQLITE_WEB_INSECURE=1`.
 

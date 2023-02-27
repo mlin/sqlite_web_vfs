@@ -5,15 +5,12 @@
 #include "ThreadPool.h"
 #include <future>
 #include <set>
+#include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 namespace WebVFS {
-
-using std::cerr;
-using std::endl;
-using std::flush;
 
 #include "dbi.h"
 
@@ -111,7 +108,6 @@ class File : public SQLiteVFS::File {
     const size_t small_KiB_;
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
     std::unique_ptr<dbiHelper> dbi_;
-    const unsigned long log_level_ = 1;
 
     // Extents cached for potential reuse, with a last-use timestamp for LRU eviction.
     // Note: The purpose of keeping extents cached is to anticipate future Read requests for nearby
@@ -136,6 +132,12 @@ class File : public SQLiteVFS::File {
     // The other state below always requires mu_ to read or write.
     std::mutex mu_;
 
+#define SQLITE_WEB_LOG(msg_level, msg)                                                             \
+    if (log_.level() >= msg_level) {                                                               \
+        std::unique_lock<std::mutex> log_lock(mu_);                                                \
+        SQLITE_VFS_LOG(msg_level, '[' << filename_ << "] " << msg)                                 \
+    }
+
     // state for [pre]fetch on background threads
     std::deque<Extent> fetch_queue_;             // queue of fetch ops
     std::map<Extent, size_t> fetch_queue2_;      // secondary index of fetch_queue_
@@ -148,19 +150,15 @@ class File : public SQLiteVFS::File {
     uint64_t read_count_ = 0, dbi_read_count_ = 0, fetch_count_ = 0, ideal_prefetch_count_ = 0,
              wasted_prefetch_count_ = 0, read_bytes_ = 0, fetch_bytes_ = 0, stalled_micros_ = 0;
 
-    // run HTTP GET request for an extent
+    // Run HTTP GET request for an extent
+    // mu_ MUST NOT be locked for this (otherwise it'll hang, due to logging)
     int FetchExtent(Extent extent, shared_string &data) {
         Timer t;
         const std::string protocol = uri_.substr(0, 6) == "https:" ? "HTTPS" : "HTTP";
         try {
             HTTP::headers reqhdrs, reshdrs;
             reqhdrs["range"] = extent.str(file_size_);
-            if (log_level_ > 4) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                     << " ..." << endl
-                     << flush;
-            }
+            SQLITE_WEB_LOG(5, protocol << " GET " << reqhdrs["range"] << " ...")
 
             long status = -1;
             bool retried = false;
@@ -174,7 +172,7 @@ class File : public SQLiteVFS::File {
                                    long response_code, const HTTP::headers &response_headers,
                                    const std::string &response_body, unsigned int attempt) {
                 retried = true;
-                if (log_level_ > 2) {
+                if (log_.level() >= 2) {
                     std::string msg = curl_easy_strerror(rc);
                     if (rc == CURLE_OK) {
                         if (response_code < 200 || response_code >= 300) {
@@ -185,68 +183,45 @@ class File : public SQLiteVFS::File {
                                   " != " + std::to_string(options.min_response_body);
                         }
                     }
-                    std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << " retrying " << msg << " (attempt " << attempt << " of "
-                         << options.max_tries << "; " << (t.micros() / 1000) << "ms elapsed)"
-                         << endl
-                         << flush;
+                    SQLITE_WEB_LOG(2, protocol << " GET " << reqhdrs["range"] << " retrying " << msg
+                                               << " (attempt " << attempt << " of "
+                                               << options.max_tries << "; " << (t.micros() / 1000)
+                                               << "ms elapsed)")
                 }
             };
             auto rc = HTTP::RetryGet(uri_, reqhdrs, status, reshdrs, *body, options);
             if (rc != CURLE_OK) {
-                if (log_level_) {
-                    std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << ' ' << curl_easy_strerror(rc) << " (" << (t.micros() / 1000) << "ms)"
-                         << endl
-                         << flush;
-                }
+                SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"] << ' '
+                                           << curl_easy_strerror(rc) << " (" << (t.micros() / 1000)
+                                           << "ms)")
                 return SQLITE_IOERR_READ;
             }
             if (status < 200 || status >= 300) {
-                if (log_level_) {
-                    std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << " error status = " << status << " (" << (t.micros() / 1000) << "ms)"
-                         << endl
-                         << flush;
-                }
+                SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"] << " error status = "
+                                           << status << " (" << (t.micros() / 1000) << "ms)")
                 return SQLITE_IOERR_READ;
             }
             if (body->size() != options.min_response_body) {
-                if (log_level_) {
-                    std::lock_guard<std::mutex> lock(mu_);
-                    cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                         << " incorrect response body length = " << body->size()
-                         << ", expected = " << extent.Bytes() << endl
-                         << flush;
-                }
+                SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
+                                           << " incorrect response body length = " << body->size()
+                                           << ", expected = " << extent.Bytes())
                 return SQLITE_IOERR_SHORT_READ;
             }
             data = body;
-            if (log_level_ > 3) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                     << " OK (" << data->size() / 1024 << "KiB, " << (t.micros() / 1000) << "ms)"
-                     << endl
-                     << flush;
-            } else if (log_level_ > 1 && retried) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET " << reqhdrs["range"]
-                     << " OK after retry (" << data->size() / 1024 << "KiB, " << (t.micros() / 1000)
-                     << "ms)" << endl
-                     << flush;
+            if (log_.level() >= 4) {
+                SQLITE_WEB_LOG(4, protocol << " GET " << reqhdrs["range"] << " OK ("
+                                           << data->size() / 1024 << "KiB, " << (t.micros() / 1000)
+                                           << "ms)")
+            } else if (log_.level() >= 2 && retried) {
+                SQLITE_WEB_LOG(4, protocol << " GET " << reqhdrs["range"] << " OK after retry ("
+                                           << data->size() / 1024 << "KiB, " << (t.micros() / 1000)
+                                           << "ms)")
             }
             return SQLITE_OK;
         } catch (std::bad_alloc &) {
             return SQLITE_IOERR_NOMEM;
         } catch (std::exception &exn) {
-            if (log_level_) {
-                std::lock_guard<std::mutex> lock(mu_);
-                cerr << "[" << filename_ << "] " << protocol << " GET: " << exn.what() << endl
-                     << flush;
-            }
+            SQLITE_WEB_LOG(1, protocol << " GET: " << exn.what());
             return SQLITE_IOERR_READ;
         }
     }
@@ -487,15 +462,13 @@ class File : public SQLiteVFS::File {
                     if (dbi_->PageSize() >= iAmt) {
                         memcpy(zBuf, dbi_->PageData(), iAmt);
                         dbi_read_count_++;
-                    } else if (log_level_) {
-                        cerr << "[" << filename_ << "] unexpected page size " << dbi_->PageSize()
-                             << " in .dbi  @ offset " << iOfst << endl
-                             << flush;
+                    } else {
+                        SQLITE_WEB_LOG(1, "unexpected page size " << dbi_->PageSize()
+                                                                  << " in .dbi  @ offset " << iOfst)
                     }
-                } else if (dbi_rc != SQLITE_NOTFOUND && log_level_) {
-                    cerr << "[" << filename_ << "] failed reading page @ offset " << iOfst
-                         << " from .dbi: " << dbi_->GetLastError() << endl
-                         << flush;
+                } else if (dbi_rc != SQLITE_NOTFOUND) {
+                    SQLITE_WEB_LOG(1, " failed reading page @ offset "
+                                          << iOfst << " from .dbi: " << dbi_->GetLastError())
                 }
             }
             if (dbi_rc != SQLITE_OK) {
@@ -527,20 +500,20 @@ class File : public SQLiteVFS::File {
             lock.lock();
             UpdateResident(lock);
             EvictResident(lock, 0); // ensure we count wasted prefetches
-            if (log_level_ > 3) {
-                cerr << "[" << filename_ << "] page reads: " << read_count_;
-                if (dbi_) {
-                    cerr << " (from .dbi: " << dbi_read_count_ << ")";
-                }
-                cerr << ", HTTP GETs: " << fetch_count_
-                     << " (prefetches ideal: " << ideal_prefetch_count_
-                     << ", wasted: " << wasted_prefetch_count_
-                     << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
-                     << fetch_bytes_ << " / " << file_size_ << ", stalled for "
-                     << (stalled_micros_ / 1000)
-                     << "ms; total connections: " << curlpool_->cumulative_connections() << endl
-                     << flush;
+        }
+        if (log_.level() >= 4) {
+            std::ostringstream msg;
+            msg << "page reads: " << read_count_;
+            if (dbi_) {
+                msg << " (from .dbi: " << dbi_read_count_ << ")";
             }
+            SQLITE_WEB_LOG(
+                4, msg.str() << ", HTTP GETs: " << fetch_count_ << " (prefetches ideal: "
+                             << ideal_prefetch_count_ << ", wasted: " << wasted_prefetch_count_
+                             << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
+                             << fetch_bytes_ << " / " << file_size_ << ", stalled for "
+                             << (stalled_micros_ / 1000)
+                             << "ms; total connections: " << curlpool_->cumulative_connections())
         }
         // deletes this:
         return SQLiteVFS::File::Close();
@@ -574,12 +547,14 @@ class File : public SQLiteVFS::File {
     int Unfetch(sqlite3_int64 iOfst, void *p) override { return SQLITE_MISUSE; }
 
   public:
-    File(const std::string &uri, const std::string &filename, sqlite_int64 file_size,
-         std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<dbiHelper> &&dbi,
-         size_t small_KiB, unsigned long log_level = 1)
-        : uri_(uri), filename_(filename), file_size_(file_size), curlpool_(std::move(curlpool)),
-          dbi_(std::move(dbi)), log_level_(log_level), threadpool_(4, 16), small_KiB_(small_KiB) {
+    File(const char *zName, const std::string &uri, const std::string &filename,
+         sqlite_int64 file_size, std::unique_ptr<HTTP::CURLpool> &&curlpool,
+         std::unique_ptr<dbiHelper> &&dbi, size_t small_KiB)
+        : SQLiteVFS::File(zName), uri_(uri), filename_(filename), file_size_(file_size),
+          curlpool_(std::move(curlpool)), dbi_(std::move(dbi)), threadpool_(4, 16),
+          small_KiB_(small_KiB) {
         methods_.iVersion = 1;
+        log_.DetectLevel(zName, 2);
     }
 };
 
@@ -601,15 +576,7 @@ class VFS : public SQLiteVFS::Wrapper {
             last_error_ = "web access is read-only";
             return SQLITE_CANTOPEN;
         }
-        unsigned long log_level = sqlite3_uri_int64(zName, "web_log", 2);
-        const char *env_log = getenv("SQLITE_WEB_LOG");
-        if (env_log && *env_log) {
-            errno = 0;
-            unsigned long env_log_level = strtoul(env_log, nullptr, 10);
-            if (errno == 0 && env_log_level != ULONG_MAX) {
-                log_level = env_log_level;
-            }
-        }
+        SQLiteVFS::Logger log_(zName, 2); // intentionally shadow this->log_
         bool insecure = sqlite3_uri_int64(zName, "web_insecure", 0) == 1;
         const char *env_insecure = getenv("SQLITE_WEB_INSECURE");
         if (env_insecure && *env_insecure) {
@@ -641,25 +608,18 @@ class VFS : public SQLiteVFS::Wrapper {
         const char *encoded_dbi_uri =
             no_dbi ? nullptr : sqlite3_uri_parameter(zName, "web_dbi_url");
 
-        if (log_level > 4) {
-            cerr << "[web_vfs] Load & init libcurl ..." << endl << flush;
-        }
+        SQLITE_VFS_LOG(5, "Load & init libcurl ...")
         int rc = HTTP::global_init();
         if (rc != CURLE_OK) {
             if (rc == CURLE_NOT_BUILT_IN) {
-                last_error_ =
-                    "[web_vfs] failed to load required symbols from libcurl; try upgrading libcurl";
+                last_error_ = "failed to load required symbols from libcurl; try upgrading libcurl";
             } else {
-                last_error_ = "[web_vfs] failed to load libcurl";
+                last_error_ = "failed to load libcurl";
             }
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_);
             return SQLITE_ERROR;
         }
-        if (log_level > 3) {
-            cerr << "[web_vfs] Load & init libcurl OK" << endl << flush;
-        }
+        SQLITE_VFS_LOG(4, "Load & init libcurl OK")
 
         // get desired URI
         try {
@@ -677,9 +637,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 return SQLITE_CANTOPEN;
             }
 
-            if (log_level > 2) {
-                cerr << "[web_vfs] opening " << uri << endl << flush;
-            }
+            SQLITE_VFS_LOG(3, "opening " << uri)
 
             // spawn background thread to sniff .dbi
             bool dbi_explicit = !dbi_uri.empty() && !no_dbi;
@@ -691,7 +649,7 @@ class VFS : public SQLiteVFS::Wrapper {
             std::string dbi_error;
             if (!dbi_uri.empty()) {
                 dbi_fut = std::async(std::launch::async, [&] {
-                    return dbiHelper::Open(conn.get(), dbi_uri, insecure, log_level, dbi,
+                    return dbiHelper::Open(conn.get(), dbi_uri, insecure, log_.level(), dbi,
                                            dbi_error);
                 });
             }
@@ -699,8 +657,7 @@ class VFS : public SQLiteVFS::Wrapper {
             // read main database header
             unsigned long long file_size = 0, page_size = 0;
             std::string db_header;
-            rc = FetchDatabaseHeader(uri, curlpool.get(), log_level, file_size, page_size,
-                                     db_header);
+            rc = FetchDatabaseHeader(log_, uri, curlpool.get(), file_size, page_size, db_header);
             if (rc != SQLITE_OK) {
                 return rc;
             }
@@ -717,11 +674,8 @@ class VFS : public SQLiteVFS::Wrapper {
                 if (dbi_rc == SQLITE_OK && dbi_header != db_header) {
                     dbi_rc = SQLITE_CORRUPT;
                     dbi_error = ".dbi does not match main database file";
-                    if (log_level > 1) {
-                        cerr << "[" << FileNameForLog(uri) << "] " << dbi_error << ": " << dbi_uri
-                             << endl
-                             << flush;
-                    }
+                    SQLITE_VFS_LOG(2, "[" << FileNameForLog(uri) << "] " << dbi_error << ": "
+                                          << dbi_uri)
                 }
             }
             if (dbi_rc != SQLITE_OK) {
@@ -729,20 +683,19 @@ class VFS : public SQLiteVFS::Wrapper {
                 if (dbi_error.empty()) {
                     dbi_error = sqlite3_errstr(dbi_rc);
                 }
-                if (!no_dbi && ((dbi_explicit && log_level > 1) || log_level > 2)) {
-                    cerr << "[" << FileNameForLog(uri) << "] opened without .dbi (" << dbi_error
-                         << ")" << endl
-                         << flush;
+                if (!no_dbi && ((dbi_explicit && log_.level() >= 2) || log_.level() >= 3)) {
+                    SQLITE_VFS_LOG(2, "[" << FileNameForLog(uri) << "] opened without .dbi ("
+                                          << dbi_error << ")")
                 }
-            } else if (log_level > 2) {
-                cerr << "[" << FileNameForLog(uri) << "] opened with .dbi" << endl << flush;
+            } else {
+                SQLITE_VFS_LOG(3, "[" << FileNameForLog(uri) << "] opened with .dbi")
             }
             curlpool->checkin(conn);
 
             // Instantiate WebFile; caller will be responsible for calling xClose() on it, which
             // will make it self-delete.
-            auto webfile = new File(uri, FileNameForLog(uri), file_size, std::move(curlpool),
-                                    std::move(dbi), size_t(small_KiB), log_level);
+            auto webfile = new File(zName, uri, FileNameForLog(uri), file_size, std::move(curlpool),
+                                    std::move(dbi), size_t(small_KiB));
             webfile->InitHandle(pFile);
             *pOutFlags = flags;
             return SQLITE_OK;
@@ -776,8 +729,8 @@ class VFS : public SQLiteVFS::Wrapper {
         return ans;
     }
 
-    int FetchDatabaseHeader(const std::string &uri, HTTP::CURLpool *connpool,
-                            unsigned long log_level, unsigned long long &db_file_size,
+    int FetchDatabaseHeader(SQLiteVFS::Logger &log_, const std::string &uri,
+                            HTTP::CURLpool *connpool, unsigned long long &db_file_size,
                             unsigned long long &page_size, std::string &db_header) {
         // GET range: bytes=0-99 to read the database file's header and detect its size.
         db_file_size = page_size = 0;
@@ -788,11 +741,8 @@ class VFS : public SQLiteVFS::Wrapper {
         HTTP::headers reqhdrs, reshdrs;
         reqhdrs["range"] = "bytes=0-99";
 
-        if (log_level > 4) {
-            cerr << "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ..."
-                 << endl
-                 << flush;
-        }
+        SQLITE_VFS_LOG(5,
+                       "[" << filename << "] " << protocol << " GET " << reqhdrs["range"] << " ...")
 
         long status = -1;
         HTTP::RetryOptions options;
@@ -801,36 +751,27 @@ class VFS : public SQLiteVFS::Wrapper {
         if (rc != CURLE_OK) {
             last_error_ = "[" + filename + "] reading database header: ";
             last_error_ += curl_easy_strerror(rc);
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_IOERR_READ;
         }
         if (status < 200 || status >= 300) {
             last_error_ = "[" + filename +
                           "] reading database header: error status = " + std::to_string(status);
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_CANTOPEN;
         }
         if (db_header.size() != 100 ||
             db_header.substr(0, 16) != std::string("SQLite format 3\000", 16)) {
             last_error_ = "[" + filename + "] remote content isn't a SQLite3 database file";
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_CORRUPT;
         }
 
         // parse content-range
         auto size_it = reshdrs.find("content-range");
         if (size_it != reshdrs.end()) {
-            if (log_level > 4) {
-                cerr << "[" << filename << "] " << protocol << " content-range: " << size_it->second
-                     << endl
-                     << flush;
-            }
+            SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
+                                  << " content-range: " << size_it->second)
             const std::string &cr = size_it->second;
             if (cr.substr(0, 6) == "bytes ") {
                 auto slash = cr.find('/');
@@ -849,9 +790,7 @@ class VFS : public SQLiteVFS::Wrapper {
         if (!db_file_size) {
             last_error_ = "[" + filename + "] " + protocol +
                           " GET bytes=0-99: empty file or invalid content-range header";
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_IOERR_READ;
         }
 
@@ -866,20 +805,15 @@ class VFS : public SQLiteVFS::Wrapper {
             page_count <<= 8;
             page_count += uint8_t(db_header[ofs]);
         }
-        if (log_level > 3) {
-            cerr << "[" << filename << "] database geometry detected: " << db_file_size
-                 << " bytes = " << page_size << " bytes/page * " << page_count << " pages ("
-                 << (t.micros() / 1000) << "ms)" << endl
-                 << flush;
-        }
+        SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
+                              << " bytes = " << page_size << " bytes/page * " << page_count
+                              << " pages (" << (t.micros() / 1000) << "ms)")
         if (page_size < 512 || page_size > 65536 || page_count == 0 ||
             db_file_size != page_size * page_count) {
             last_error_ = "[" + filename +
                           "] database corrupt or truncated; content-range file size doesn't "
                           "match in-header database size";
-            if (log_level) {
-                cerr << last_error_ << endl << flush;
-            }
+            SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_CORRUPT;
         }
         return SQLITE_OK;

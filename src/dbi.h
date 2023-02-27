@@ -103,7 +103,7 @@ class dbiHelper {
     }
 
     static int Open(HTTP::CURLconn *curlconn, const std::string &dbi_url, bool web_insecure,
-                    int web_log, std::unique_ptr<dbiHelper> &dbi, std::string &error) noexcept {
+                    int log_level, std::unique_ptr<dbiHelper> &dbi, std::string &error) noexcept {
         error.clear();
 
         bool web = true;
@@ -125,7 +125,7 @@ class dbiHelper {
             if (web_insecure) {
                 open_uri += "&web_insecure=1";
             }
-            open_uri += "&web_small_KiB=1048576&web_log=" + std::to_string(web_log);
+            open_uri += "&web_small_KiB=1048576&vfs_log=" + std::to_string(log_level);
         }
 
         sqlite3 *raw_dbiconn = nullptr;
