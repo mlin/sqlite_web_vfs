@@ -31,8 +31,9 @@ namespace SQLiteVFS {
  *   1. SQLITE_VFS_LOG environment variable
  *   2. vfs_log URI parameter (for URI-opened File)
  *   3. When compiled in DEBUG mode, 5.
- *   4. Otherwise 0.
+ *   4. Otherwise 0 (but default can be overridden by implementation)
  *
+ * Recommended levels: 1=error, 2=warning, 3=notice, 4=info, 5=debug.
  */
 class Logger : public std::ostream {
   public:
