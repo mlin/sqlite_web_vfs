@@ -172,7 +172,7 @@ class File : public SQLiteVFS::File {
                                    long response_code, const HTTP::headers &response_headers,
                                    const std::string &response_body, unsigned int attempt) {
                 retried = true;
-                if (log_.level() >= 2) {
+                if (log_.level() >= 3) {
                     std::string msg = curl_easy_strerror(rc);
                     if (rc == CURLE_OK) {
                         if (response_code < 200 || response_code >= 300) {
@@ -183,7 +183,7 @@ class File : public SQLiteVFS::File {
                                   " != " + std::to_string(options.min_response_body);
                         }
                     }
-                    SQLITE_WEB_LOG(2, protocol << " GET " << reqhdrs["range"] << " retrying " << msg
+                    SQLITE_WEB_LOG(3, protocol << " GET " << reqhdrs["range"] << " retrying " << msg
                                                << " (attempt " << attempt << " of "
                                                << options.max_tries << "; " << (t.micros() / 1000)
                                                << "ms elapsed)")
