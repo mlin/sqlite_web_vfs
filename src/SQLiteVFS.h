@@ -87,7 +87,8 @@ class Logger : public std::ostream {
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define SQLITE_VFS_LOG(msg_level, msg)                                                             \
     if (log_.level() >= msg_level) {                                                               \
-        log_ << '[' << __FILENAME__ << ":" << __LINE__ << "] " << msg << std::endl;                \
+        log_ << '[' << __FILENAME__ << ":" << __LINE__ << ':' << msg_level << "] " << msg << '\n'  \
+             << std::flush;                                                                        \
     }
 
 /**
