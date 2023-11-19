@@ -27,6 +27,17 @@ project(sqlite_web_vfs VERSION 1.0
         DESCRIPTION "SQLite3 extension for read-only HTTP(S) database access"
         LANGUAGES C CXX)
 
+# Enable pkg-config support in CMake
+find_package(PkgConfig REQUIRED)
+
+# Find SQLite and libmicrohttpd using pkg-config
+pkg_check_modules(SQLITE REQUIRED sqlite3)
+pkg_check_modules(LIBMHD REQUIRED libmicrohttpd)
+
+include_directories(${SQLITE_INCLUDE_DIRS} ${LIBMHD_INCLUDE_DIRS})
+link_directories(${SQLITE_LIBRARY_DIRS} ${LIBMHD_LIBRARY_DIRS})
+
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
