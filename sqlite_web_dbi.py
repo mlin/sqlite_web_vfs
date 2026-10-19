@@ -67,7 +67,7 @@ def main(argv):
     last_pageno = dbfile_size // page_size
 
     if not btrees:
-        print(f"[WARN] database appears to be empty", file=sys.stderr)
+        print("[WARN] database appears to be empty", file=sys.stderr)
     if not args.dbifile:
         args.dbifile = args.dbfile + ".dbi"
     if os.path.exists(args.dbifile):
