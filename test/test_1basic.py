@@ -1,7 +1,8 @@
-import sys
 import os
 import sqlite3
+import sys
 import urllib.parse
+
 import pytest
 
 HERE = os.path.dirname(__file__)

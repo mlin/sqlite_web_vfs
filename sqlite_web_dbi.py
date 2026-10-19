@@ -22,13 +22,13 @@ Background:
     https://sqlite.org/dbstat.html
 """
 
-import sys
-import os
 import argparse
-import itertools
 import contextlib
+import itertools
 import multiprocessing
+import os
 import sqlite3
+import sys
 
 
 def main(argv):
