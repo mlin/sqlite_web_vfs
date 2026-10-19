@@ -40,9 +40,11 @@ def main(argv):
         "dbfile",
         type=str,
         metavar="DBFILE",
-        help="immutable SQLite database filename"
-        if __package__ != "genomicsqlite"
-        else argparse.SUPPRESS,
+        help=(
+            "immutable SQLite database filename"
+            if __package__ != "genomicsqlite"
+            else argparse.SUPPRESS
+        ),
     )
     parser.add_argument(
         "-o",
@@ -194,21 +196,17 @@ def write_dbi(dbfile, page_size, btrees, pagenos, dbifile):
 
         # application_id = "dbi"
         # small page size minimizes bin-packing overhead to store blobs of comparable size
-        dbih.executescript(
-            """
+        dbih.executescript("""
             pragma application_id = 0x646269;
             pragma page_size = 1024;
             pragma locking_mode = EXCLUSIVE
-            """
-        )
+            """)
 
         with dbih:  # transaction
-            dbih.executescript(
-                """
+            dbih.executescript("""
                 create table web_dbi_meta(key text primary key, value blob) without rowid;
                 create table web_dbi_pages(offset integer primary key, data blob not null)
-                """
-            )
+                """)
 
             for pageno in pagenos:
                 assert 0 < pageno <= (dbfile_size // page_size)
