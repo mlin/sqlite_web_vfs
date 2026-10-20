@@ -1,7 +1,8 @@
-import sys
 import os
 import sqlite3
+import sys
 import urllib.parse
+
 import pytest
 
 HERE = os.path.dirname(__file__)
@@ -39,13 +40,17 @@ def test_chinook():
     assert set(p[1] for p in schema if p[0] == "table") == set(CHINOOK_COUNTS.keys())
     sys.stdout.flush()
 
-    print(list(con.execute("""
+    print(
+        list(
+            con.execute("""
                 select e.*, count(i.invoiceid) as 'Total Number of Sales'
                 from employee as e
                     join customer as c on e.employeeid = c.supportrepid
                     join invoice as i on i.customerid = c.customerid
                 group by e.employeeid
-                """)))
+                """)
+        )
+    )
     sys.stdout.flush()
 
     for ty, tbl in schema:
@@ -56,7 +61,7 @@ def test_chinook():
 
 
 def test_tpch_q1():
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
@@ -68,7 +73,8 @@ def test_tpch_q1():
     schema = list(con.execute("select type, name from sqlite_master"))
     print(schema)
 
-    results = list(con.execute("""
+    results = list(
+        con.execute("""
             select
                 l_returnflag,
                 l_linestatus,
@@ -82,14 +88,15 @@ def test_tpch_q1():
             from lineitem
             where l_shipdate <= date('1998-12-01', '-90 day')
             group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;
-            """))
+            """)
+    )
     print(results)
     sys.stdout.flush()
 
 
 @pytest.mark.skipif("GITHUB_RUN_ID" not in os.environ, reason="run stressful Q8 on cloud only")
 def test_tpch_q8():
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "web_vfs"))
 
@@ -100,7 +107,8 @@ def test_tpch_q8():
 
     con.executescript("PRAGMA cache_size = -2100000")
 
-    results = list(con.execute("""
+    results = list(
+        con.execute("""
             select
                 o_year,
                 sum(case when nation = 'BRAZIL' then volume else 0 end) / sum(volume) as mkt_share
@@ -123,6 +131,7 @@ def test_tpch_q8():
                     and p_type = 'ECONOMY ANODIZED STEEL')
                 as all_nations
             group by o_year order by o_year;
-            """))
+            """)
+    )
     print(results)
     sys.stdout.flush()
