@@ -104,7 +104,7 @@ struct Extent {
 
 class File : public SQLiteVFS::File {
     const std::string uri_, filename_;
-    const sqlite_int64 file_size_;
+    const int64_t file_size_;
     const size_t small_KiB_;
     const std::unique_ptr<HTTP::CURLpool> curlpool_;
     std::unique_ptr<dbiHelper> dbi_;
@@ -523,7 +523,7 @@ class File : public SQLiteVFS::File {
     int Truncate(sqlite3_int64 size) override { return SQLITE_MISUSE; }
     int Sync(int flags) override { return SQLITE_MISUSE; }
     int FileSize(sqlite3_int64 *pSize) override {
-        *pSize = (sqlite3_int64)file_size_;
+        *pSize = file_size_;
         return SQLITE_OK;
     }
     int Lock(int eLock) override { return SQLITE_OK; }
@@ -548,7 +548,7 @@ class File : public SQLiteVFS::File {
 
   public:
     File(const char *zName, const std::string &uri, const std::string &filename,
-         sqlite_int64 file_size, std::unique_ptr<HTTP::CURLpool> &&curlpool,
+         int64_t file_size, std::unique_ptr<HTTP::CURLpool> &&curlpool,
          std::unique_ptr<dbiHelper> &&dbi, size_t small_KiB)
         : SQLiteVFS::File(zName), uri_(uri), filename_(filename), file_size_(file_size),
           curlpool_(std::move(curlpool)), dbi_(std::move(dbi)), threadpool_(4, 16),

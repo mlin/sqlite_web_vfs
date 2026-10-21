@@ -151,7 +151,7 @@ class dbiHelper {
     // PageSize() can be found at PageData().
     // Otherwise, PageSize() and PageData() are undefined; returns SQLITE_NOTFOUND if desired page
     // isn't present in DBI, or any other error code.
-    int Seek(sqlite_int64 offset) noexcept {
+    int Seek(int64_t offset) noexcept {
         int rc = sqlite3_reset(cursor_.get());
         if (rc != SQLITE_OK) {
             last_error_ = sqlite3_errstr(rc);

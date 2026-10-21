@@ -5,11 +5,11 @@
 #pragma once
 
 #include <assert.h>
+#include <climits>
 #include <iostream>
 #include <memory>
 #include <string.h>
 #include <string>
-#include <climits>
 
 /*
 Omitted so that includer can choose whether to use sqlite3.h or sqlite3ext.h
