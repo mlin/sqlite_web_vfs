@@ -169,8 +169,7 @@ def collect_pagenos_worker(inp):
     query = "select pageno from dbstat where name=?"
     if not (
         btree.startswith("sqlite_")
-        or btree.endswith("pages_btree_interior")
-        or btree.endswith("pages_btree_interior_pageno")
+        or btree.endswith(("pages_btree_interior", "pages_btree_interior_pageno"))
     ) or btree.startswith("sqlite_autoindex_"):
         # include all pages of sqlite system tables, and sqlite_zstd_vfs' index of its own nested
         # btree interior pages

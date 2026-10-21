@@ -37,7 +37,7 @@ def test_chinook():
     )
     schema = list(con.execute("select type, name from sqlite_master"))
     print(schema)
-    assert set(p[1] for p in schema if p[0] == "table") == set(CHINOOK_COUNTS.keys())
+    assert {p[1] for p in schema if p[0] == "table"} == set(CHINOOK_COUNTS.keys())
     sys.stdout.flush()
 
     print(
