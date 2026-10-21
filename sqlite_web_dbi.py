@@ -183,7 +183,7 @@ def write_dbi(dbfile, page_size, btrees, pagenos, dbifile):
     "generate .dbi file, copying the content of the given page numbers"
 
     with contextlib.ExitStack() as stack:
-        cursor = open(dbfile, "rb")
+        cursor = open(dbfile, "rb")  # noqa: SIM115 -- file lifetime managed by ExitStack
         stack.enter_context(cursor)
         cursor.seek(0, os.SEEK_END)
         dbfile_size = cursor.tell()
