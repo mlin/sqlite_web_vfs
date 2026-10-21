@@ -547,9 +547,9 @@ class File : public SQLiteVFS::File {
     int Unfetch(sqlite3_int64 iOfst, void *p) override { return SQLITE_MISUSE; }
 
   public:
-    File(const char *zName, const std::string &uri, const std::string &filename,
-         int64_t file_size, std::unique_ptr<HTTP::CURLpool> &&curlpool,
-         std::unique_ptr<dbiHelper> &&dbi, size_t small_KiB)
+    File(const char *zName, const std::string &uri, const std::string &filename, int64_t file_size,
+         std::unique_ptr<HTTP::CURLpool> &&curlpool, std::unique_ptr<dbiHelper> &&dbi,
+         size_t small_KiB)
         : SQLiteVFS::File(zName), uri_(uri), filename_(filename), file_size_(file_size),
           curlpool_(std::move(curlpool)), dbi_(std::move(dbi)), threadpool_(4, 16),
           small_KiB_(small_KiB) {
