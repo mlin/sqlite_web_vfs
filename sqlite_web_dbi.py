@@ -22,13 +22,13 @@ Background:
     https://sqlite.org/dbstat.html
 """
 
-import sys
-import os
 import argparse
-import itertools
 import contextlib
+import itertools
 import multiprocessing
+import os
 import sqlite3
+import sys
 
 
 def main(argv):
@@ -67,7 +67,7 @@ def main(argv):
     last_pageno = dbfile_size // page_size
 
     if not btrees:
-        print(f"[WARN] database appears to be empty", file=sys.stderr)
+        print("[WARN] database appears to be empty", file=sys.stderr)
     if not args.dbifile:
         args.dbifile = args.dbfile + ".dbi"
     if os.path.exists(args.dbifile):
@@ -169,8 +169,7 @@ def collect_pagenos_worker(inp):
     query = "select pageno from dbstat where name=?"
     if not (
         btree.startswith("sqlite_")
-        or btree.endswith("pages_btree_interior")
-        or btree.endswith("pages_btree_interior_pageno")
+        or btree.endswith(("pages_btree_interior", "pages_btree_interior_pageno"))
     ) or btree.startswith("sqlite_autoindex_"):
         # include all pages of sqlite system tables, and sqlite_zstd_vfs' index of its own nested
         # btree interior pages
@@ -184,7 +183,7 @@ def write_dbi(dbfile, page_size, btrees, pagenos, dbifile):
     "generate .dbi file, copying the content of the given page numbers"
 
     with contextlib.ExitStack() as stack:
-        cursor = open(dbfile, "rb")
+        cursor = open(dbfile, "rb")  # noqa: SIM115 -- file lifetime managed by ExitStack
         stack.enter_context(cursor)
         cursor.seek(0, os.SEEK_END)
         dbfile_size = cursor.tell()

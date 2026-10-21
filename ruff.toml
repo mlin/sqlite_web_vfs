@@ -1,0 +1,10 @@
+# Ruff: run on ruff's own defaults (project lint policy, 2026-10-20).
+# Opt out of specific rules only where warranted; each opt-out is documented
+# inline. No rule sets are selected or opted into.
+line-length = 100 # exception to the ruff default (88): matches this codebase's black -l 100 formatting; avoids a whole-tree reformat
+
+[lint]
+ignore = [
+    "E722", # bare except: deliberate bare-except uses in this codebase, carried from the flake8 era
+    "EXE001", # shebang-not-executable: sqlite_web_dbi.py is a user-facing utility; README instructs download + chmod +x, so the git mode is intentionally plain
+]
