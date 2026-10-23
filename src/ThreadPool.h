@@ -121,20 +121,19 @@ class ThreadPool {
         }
         job.seqno = seqno_next_++;
         par_queue_.push(job);
+        auto par_queue_size = par_queue_.size();
         lock.unlock();
         cv_enqueue_.notify_one();
-        if (threads_.size() < max_threads_ && threads_.size() < par_queue_.size()) {
+        if (threads_.size() < max_threads_ && threads_.size() < par_queue_size) {
             threads_.emplace_back([this]() { this->Worker(); });
         }
     }
 
     // Await completion of all previously enqueued jobs
     virtual void Barrier() {
-        if (seqno_next_) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            while (seqno_done_ < seqno_next_) {
-                cv_done_.wait(lock);
-            }
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (seqno_done_ < seqno_next_) {
+            cv_done_.wait(lock);
         }
     }
 };
