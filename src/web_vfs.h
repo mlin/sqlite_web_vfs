@@ -490,6 +490,7 @@ class File : public SQLiteVFS::File {
     }
 
     int Close() override {
+        int rc = SQLITE_OK;
         {
             std::unique_lock<std::mutex> lock(mu_);
             fetch_queue_.clear();
@@ -498,7 +499,15 @@ class File : public SQLiteVFS::File {
             lock.unlock();
             threadpool_.Barrier();
             lock.lock();
-            UpdateResident(lock);
+            try {
+                UpdateResident(lock);
+            } catch (int rc2) {
+                // A background fetch error was still pending. Capture it as
+                // our result, but do not let it skip the cleanup and
+                // self-deletion below: xClose must always destroy the File
+                // (same pattern as FileWrapper::Close).
+                rc = rc2;
+            }
             EvictResident(lock, 0); // ensure we count wasted prefetches
         }
         if (log_.level() >= 4) {
@@ -516,7 +525,8 @@ class File : public SQLiteVFS::File {
                              << "ms; total connections: " << curlpool_->cumulative_connections())
         }
         // deletes this:
-        return SQLiteVFS::File::Close();
+        SQLiteVFS::File::Close();
+        return rc;
     }
 
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override { return SQLITE_MISUSE; }
