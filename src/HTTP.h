@@ -3,6 +3,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -279,6 +281,95 @@ long long ReadContentLengthHeader(const headers &response_headers) {
         return -2;
     }
     return (long long)file_size;
+}
+
+// A parsed Content-Range response header value, restricted to the satisfied
+// byte-range form; see ParseContentRange(). total is meaningful only when
+// total_known (the header may give "*" for an unknown total).
+struct ContentRange {
+    uint64_t first = 0, last = 0, total = 0;
+    bool total_known = false;
+};
+
+// Parse a Content-Range header value (RFC 7233), accepting only the satisfied
+// byte-range form with strict syntax: after trimming surrounding optional
+// whitespace (SP/HTAB), exactly "bytes SP <first>-<last>/<total>" where the
+// numbers are unsigned decimal (no signs, no embedded whitespace, no suffix
+// junk, no multiple ranges) and <total> may instead be "*". Also validates
+// first <= last, and last < total when the total is known. Returns true and
+// sets out on success; leaves out untouched otherwise.
+bool ParseContentRange(const std::string &value, ContentRange &out) {
+    size_t pos = value.find_first_not_of(" \t");
+    if (pos == std::string::npos) {
+        return false;
+    }
+    const size_t end = value.find_last_not_of(" \t") + 1; // one past the last non-OWS char
+
+    // range unit "bytes" (ASCII case-insensitive), then exactly one space
+    if (end - pos < 6) {
+        return false;
+    }
+    for (size_t i = 0; i < 5; ++i) {
+        if (std::tolower((unsigned char)value[pos + i]) != "bytes"[i]) {
+            return false;
+        }
+    }
+    pos += 5;
+    if (value[pos] != ' ') {
+        return false;
+    }
+    ++pos;
+
+    // unsigned decimal number at pos, with an overflow check
+    uint64_t number = 0;
+    auto parse_number = [&]() {
+        if (pos == end || !std::isdigit((unsigned char)value[pos])) {
+            return false;
+        }
+        uint64_t n = 0;
+        while (pos < end && std::isdigit((unsigned char)value[pos])) {
+            unsigned int digit = (unsigned int)(value[pos] - '0');
+            if (n > (UINT64_MAX - digit) / 10) {
+                return false;
+            }
+            n = n * 10 + digit;
+            ++pos;
+        }
+        number = n;
+        return true;
+    };
+
+    ContentRange ans;
+    if (!parse_number()) {
+        return false;
+    }
+    ans.first = number;
+    if (pos == end || value[pos] != '-') {
+        return false;
+    }
+    ++pos;
+    if (!parse_number()) {
+        return false;
+    }
+    ans.last = number;
+    if (pos == end || value[pos] != '/') {
+        return false;
+    }
+    ++pos;
+    if (pos < end && value[pos] == '*') {
+        ++pos;
+    } else {
+        if (!parse_number()) {
+            return false;
+        }
+        ans.total = number;
+        ans.total_known = true;
+    }
+    if (pos != end || ans.first > ans.last || (ans.total_known && ans.last >= ans.total)) {
+        return false;
+    }
+    out = ans;
+    return true;
 }
 
 enum class Method { GET, HEAD };
