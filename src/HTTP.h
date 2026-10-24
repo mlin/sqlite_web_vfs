@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -350,59 +351,56 @@ struct ContentRange {
 // byte-range form with strict syntax: after trimming surrounding optional
 // whitespace (SP/HTAB), exactly "bytes SP <first>-<last>/<total>" where the
 // numbers are unsigned decimal (no signs, no embedded whitespace, no suffix
-// junk, no multiple ranges) and <total> may instead be "*". Also validates
-// first <= last, and last < total when the total is known. Returns true and
-// sets out on success; leaves out untouched otherwise.
+// junk, no multiple ranges) and <total> may instead be "*". The regex checks
+// the grammar; the captured numbers are then verified as strings (leading
+// zeros stripped): first <= last, last < total when the total is known, and
+// each value within uint64 range -- string comparison handles numbers of
+// any magnitude, so overflow needs no arithmetic. Only then are the values
+// converted. Returns true and sets out on success; leaves out untouched
+// otherwise.
 bool ParseContentRange(const std::string &value, ContentRange &out) {
-    size_t pos = value.find_first_not_of(" \t");
-    if (pos == std::string::npos) {
+    static const std::regex re(R"([ \t]*bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)[ \t]*)",
+                               std::regex::ECMAScript | std::regex::icase);
+    std::smatch m;
+    if (!std::regex_match(value, m, re)) {
         return false;
     }
-    const size_t end = value.find_last_not_of(" \t") + 1; // one past the last non-OWS char
 
-    // range unit "bytes" (ASCII case-insensitive), then exactly one space
-    if (end - pos < 6) {
+    // strip leading zeros, so the numbers can be compared as strings:
+    // first by length, then lexicographically
+    auto normalize = [](std::string s) {
+        size_t i = s.find_first_not_of('0');
+        return i == std::string::npos ? std::string("0") : s.substr(i);
+    };
+    auto cmp_decimal = [](const std::string &a, const std::string &b) {
+        if (a.size() != b.size()) {
+            return a.size() < b.size() ? -1 : 1;
+        }
+        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    };
+
+    const std::string first = normalize(m[1].str());
+    const std::string last = normalize(m[2].str());
+    const bool total_known = m[3].str() != "*";
+    const std::string total = total_known ? normalize(m[3].str()) : "";
+
+    if (cmp_decimal(first, last) > 0 || (total_known && cmp_decimal(last, total) >= 0)) {
         return false;
     }
-    for (size_t i = 0; i < 5; ++i) {
-        if (std::tolower((unsigned char)value[pos + i]) != "bytes"[i]) {
+
+    // the values are known to be decimal strings in range; convert them
+    static const std::string UINT64_MAX_DECIMAL = "18446744073709551615";
+    auto conv = [&cmp_decimal](const std::string &s, uint64_t &v) {
+        if (cmp_decimal(s, UINT64_MAX_DECIMAL) > 0) {
             return false;
         }
-    }
-    pos += 5;
-    if (value[pos] != ' ') {
-        return false;
-    }
-    ++pos;
-
-    uint64_t number = 0;
+        size_t p = 0;
+        return ParseUnsignedDecimal(s, p, s.size(), v) && p == s.size();
+    };
     ContentRange ans;
-    if (!ParseUnsignedDecimal(value, pos, end, number)) {
-        return false;
-    }
-    ans.first = number;
-    if (pos == end || value[pos] != '-') {
-        return false;
-    }
-    ++pos;
-    if (!ParseUnsignedDecimal(value, pos, end, number)) {
-        return false;
-    }
-    ans.last = number;
-    if (pos == end || value[pos] != '/') {
-        return false;
-    }
-    ++pos;
-    if (pos < end && value[pos] == '*') {
-        ++pos;
-    } else {
-        if (!ParseUnsignedDecimal(value, pos, end, number)) {
-            return false;
-        }
-        ans.total = number;
-        ans.total_known = true;
-    }
-    if (pos != end || ans.first > ans.last || (ans.total_known && ans.last >= ans.total)) {
+    ans.total_known = total_known;
+    if (!conv(first, ans.first) || !conv(last, ans.last) ||
+        (total_known && !conv(total, ans.total))) {
         return false;
     }
     out = ans;
