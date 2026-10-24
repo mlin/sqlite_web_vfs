@@ -249,13 +249,14 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     HeaderSink &sink = *reinterpret_cast<HeaderSink *>(userdata);
     headers &h = sink.out;
 
+    const std::string line(ptr, size);
+
     // libcurl passes the headers of every response in one perform through
     // this callback: 1xx interims, redirect responses, proxy CONNECT
     // responses, and the final response. A status line starts a new
     // response, so drop everything accumulated so far: callers must see
     // only the final response's headers.
-    if (size >= 5 && ptr[0] == 'H' && ptr[1] == 'T' && ptr[2] == 'T' && ptr[3] == 'P' &&
-        ptr[4] == '/') {
+    if (line.compare(0, 5, "HTTP/") == 0) {
         h.clear();
         sink.complete = false;
         return size;
@@ -265,7 +266,7 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     // trailers (sent after the body of a chunked response), not headers;
     // ignore them, so a trailer can neither supply nor overwrite a header
     // (e.g. Content-Range) that callers validate.
-    if ((size == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (size == 1 && ptr[0] == '\n')) {
+    if (line == "\r\n" || line == "\n") {
         sink.complete = true;
         return size;
     }
