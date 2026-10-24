@@ -490,33 +490,53 @@ class File : public SQLiteVFS::File {
     }
 
     int Close() override {
-        {
-            std::unique_lock<std::mutex> lock(mu_);
-            fetch_queue_.clear();
-            fetch_queue2_.clear();
-            // TODO: abort ongoing requests via atomic<bool> passed into libcurl progress function
-            lock.unlock();
-            threadpool_.Barrier();
-            lock.lock();
-            UpdateResident(lock);
-            EvictResident(lock, 0); // ensure we count wasted prefetches
-        }
-        if (log_.level() >= 4) {
-            std::ostringstream msg;
-            msg << "page reads: " << read_count_;
-            if (dbi_) {
-                msg << " (from .dbi: " << dbi_read_count_ << ")";
+        // xClose must always destroy the File (SQLiteVFS.h), and SQLite core
+        // cannot act on an xClose result, so Close() surfaces no error:
+        // pending prefetch errors are logged and discarded (an extent that's
+        // actually needed reports its error again when fetched on demand),
+        // and no other failure may skip the cleanup and self-deletion either.
+        try {
+            std::map<Extent, int> discarded_errors;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                fetch_queue_.clear();
+                fetch_queue2_.clear();
+                // TODO: abort ongoing requests via atomic<bool> passed into libcurl
+                // progress function
+                lock.unlock();
+                threadpool_.Barrier();
+                lock.lock();
+                discarded_errors.swap(fetch_error_);
+                // fetch_error_ is drained, so this cannot surface a fetch
+                // error; it merges the completed fetches.
+                UpdateResident(lock);
+                EvictResident(lock, 0); // ensure we count wasted prefetches
             }
-            SQLITE_WEB_LOG(
-                4, msg.str() << ", HTTP GETs: " << fetch_count_ << " (prefetches ideal: "
-                             << ideal_prefetch_count_ << ", wasted: " << wasted_prefetch_count_
-                             << "), bytes read / downloaded / filesize: " << read_bytes_ << " / "
-                             << fetch_bytes_ << " / " << file_size_ << ", stalled for "
-                             << (stalled_micros_ / 1000)
-                             << "ms; total connections: " << curlpool_->cumulative_connections())
+            for (auto &err : discarded_errors) {
+                SQLITE_WEB_LOG(1, "discarding prefetch error " << err.second
+                                                               << " for extent at offset "
+                                                               << err.first.Offset());
+            }
+            if (log_.level() >= 4) {
+                std::ostringstream msg;
+                msg << "page reads: " << read_count_;
+                if (dbi_) {
+                    msg << " (from .dbi: " << dbi_read_count_ << ")";
+                }
+                SQLITE_WEB_LOG(
+                    4, msg.str() << ", HTTP GETs: " << fetch_count_ << " (prefetches ideal: "
+                                 << ideal_prefetch_count_ << ", wasted: " << wasted_prefetch_count_
+                                 << "), bytes read / downloaded / filesize: " << read_bytes_
+                                 << " / " << fetch_bytes_ << " / " << file_size_ << ", stalled for "
+                                 << (stalled_micros_ / 1000) << "ms; total connections: "
+                                 << curlpool_->cumulative_connections())
+            }
+        } catch (...) {
+            // fall through: the File must still be destroyed
         }
         // deletes this:
-        return SQLiteVFS::File::Close();
+        SQLiteVFS::File::Close();
+        return SQLITE_OK;
     }
 
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override { return SQLITE_MISUSE; }
