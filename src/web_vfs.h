@@ -208,6 +208,26 @@ class File : public SQLiteVFS::File {
                                            << ", expected = " << extent.Bytes())
                 return SQLITE_IOERR_SHORT_READ;
             }
+            if (status == 206) {
+                // The origin must confirm it sent the range we asked for: a
+                // misbehaving server or proxy could otherwise return the
+                // wrong bytes with the right length, and we'd install them
+                // as the requested extent (SQLite has no page checksums to
+                // catch it later). Content-Range is mandatory on 206
+                // responses (RFC 7233), so an absent header is also an error.
+                auto cr_it = reshdrs.find("content-range");
+                HTTP::ContentRange cr;
+                if (cr_it == reshdrs.end() || body->size() == 0 ||
+                    !HTTP::ParseContentRange(cr_it->second, cr) || cr.first != extent.Offset() ||
+                    cr.last - cr.first != body->size() - 1 ||
+                    (cr.total_known && cr.total != uint64_t(file_size_))) {
+                    SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
+                                               << " mismatched content-range = "
+                                               << (cr_it == reshdrs.end() ? std::string("<absent>")
+                                                                          : cr_it->second))
+                    return SQLITE_IOERR_READ;
+                }
+            }
             data = body;
             if (log_.level() >= 4) {
                 SQLITE_WEB_LOG(4, protocol << " GET " << reqhdrs["range"] << " OK ("
@@ -806,24 +826,18 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_CORRUPT;
         }
 
-        // parse content-range
+        // parse content-range: the origin must confirm it sent the requested
+        // header range (bytes 0-99) and disclose the total file size. A
+        // missing or malformed header, or one naming a different range,
+        // leaves db_file_size zero, which the check below rejects.
         auto size_it = reshdrs.find("content-range");
         if (size_it != reshdrs.end()) {
             SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
                                   << " content-range: " << size_it->second)
-            const std::string &cr = size_it->second;
-            if (cr.substr(0, 6) == "bytes ") {
-                auto slash = cr.find('/');
-                if (slash != std::string::npos) {
-                    std::string size_txt = cr.substr(slash + 1);
-                    const char *size_str = size_txt.c_str();
-                    char *endptr = nullptr;
-                    errno = 0;
-                    db_file_size = strtoull(size_str, &endptr, 10);
-                    if (errno || endptr != size_str + size_txt.size()) {
-                        db_file_size = 0;
-                    }
-                }
+            HTTP::ContentRange cr;
+            if (HTTP::ParseContentRange(size_it->second, cr) && cr.first == 0 && cr.last == 99 &&
+                cr.total_known) {
+                db_file_size = cr.total;
             }
         }
         if (!db_file_size) {

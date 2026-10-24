@@ -3,6 +3,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -232,9 +234,43 @@ std::string &rtrim(std::string &s) {
 
 std::string &trim(std::string &s) { return ltrim(rtrim(s)); }
 
+// State for headerfunction: accumulates one perform's response headers
+// into the caller's map, tracking whether the current response's header
+// section has ended.
+struct HeaderSink {
+    headers &out;
+    bool complete = false;
+    explicit HeaderSink(headers &o) : out(o) {}
+};
+
 size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size *= nmemb;
-    headers &h = *reinterpret_cast<headers *>(userdata);
+    HeaderSink &sink = *reinterpret_cast<HeaderSink *>(userdata);
+    headers &h = sink.out;
+
+    // libcurl passes the headers of every response in one perform through
+    // this callback: 1xx interims, redirect responses, proxy CONNECT
+    // responses, and the final response. A status line starts a new
+    // response, so drop everything accumulated so far: callers must see
+    // only the final response's headers.
+    if (size >= 5 && ptr[0] == 'H' && ptr[1] == 'T' && ptr[2] == 'T' && ptr[3] == 'P' &&
+        ptr[4] == '/') {
+        h.clear();
+        sink.complete = false;
+        return size;
+    }
+
+    // The blank line ends a header section. Fields delivered after it are
+    // trailers (sent after the body of a chunked response), not headers;
+    // ignore them, so a trailer can neither supply nor overwrite a header
+    // (e.g. Content-Range) that callers validate.
+    if ((size == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (size == 1 && ptr[0] == '\n')) {
+        sink.complete = true;
+        return size;
+    }
+    if (sink.complete) {
+        return size;
+    }
 
     size_t sep;
     for (sep = 0; sep < size; sep++) {
@@ -260,6 +296,28 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size;
 }
 
+// Strict unsigned-decimal reader shared by the HTTP header parsers below:
+// reads one or more ASCII digits at s[pos] (bounded by end), with no sign,
+// no embedded whitespace, and an overflow check. On success, sets out,
+// advances pos past the digits, and returns true; otherwise returns false
+// and leaves out untouched.
+bool ParseUnsignedDecimal(const std::string &s, size_t &pos, size_t end, uint64_t &out) {
+    if (pos >= end || !std::isdigit((unsigned char)s[pos])) {
+        return false;
+    }
+    uint64_t n = 0;
+    while (pos < end && std::isdigit((unsigned char)s[pos])) {
+        unsigned int digit = (unsigned int)(s[pos] - '0');
+        if (n > (UINT64_MAX - digit) / 10) {
+            return false;
+        }
+        n = n * 10 + digit;
+        ++pos;
+    }
+    out = n;
+    return true;
+}
+
 // Read content-length response header
 // return: >= 0 the value
 //         -1 header absent
@@ -271,14 +329,84 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     }
     std::string size = size_it->second;
     size = trim(size);
-    const char *size_str = size.c_str();
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long file_size = strtoull(size_str, &endptr, 10);
-    if (errno || endptr != size_str + size.size() || file_size > LLONG_MAX) {
+    size_t pos = 0;
+    uint64_t file_size = 0;
+    if (!ParseUnsignedDecimal(size, pos, size.size(), file_size) || pos != size.size() ||
+        file_size > (uint64_t)LLONG_MAX) {
         return -2;
     }
     return (long long)file_size;
+}
+
+// A parsed Content-Range response header value, restricted to the satisfied
+// byte-range form; see ParseContentRange(). total is meaningful only when
+// total_known (the header may give "*" for an unknown total).
+struct ContentRange {
+    uint64_t first = 0, last = 0, total = 0;
+    bool total_known = false;
+};
+
+// Parse a Content-Range header value (RFC 7233), accepting only the satisfied
+// byte-range form with strict syntax: after trimming surrounding optional
+// whitespace (SP/HTAB), exactly "bytes SP <first>-<last>/<total>" where the
+// numbers are unsigned decimal (no signs, no embedded whitespace, no suffix
+// junk, no multiple ranges) and <total> may instead be "*". Also validates
+// first <= last, and last < total when the total is known. Returns true and
+// sets out on success; leaves out untouched otherwise.
+bool ParseContentRange(const std::string &value, ContentRange &out) {
+    size_t pos = value.find_first_not_of(" \t");
+    if (pos == std::string::npos) {
+        return false;
+    }
+    const size_t end = value.find_last_not_of(" \t") + 1; // one past the last non-OWS char
+
+    // range unit "bytes" (ASCII case-insensitive), then exactly one space
+    if (end - pos < 6) {
+        return false;
+    }
+    for (size_t i = 0; i < 5; ++i) {
+        if (std::tolower((unsigned char)value[pos + i]) != "bytes"[i]) {
+            return false;
+        }
+    }
+    pos += 5;
+    if (value[pos] != ' ') {
+        return false;
+    }
+    ++pos;
+
+    uint64_t number = 0;
+    ContentRange ans;
+    if (!ParseUnsignedDecimal(value, pos, end, number)) {
+        return false;
+    }
+    ans.first = number;
+    if (pos == end || value[pos] != '-') {
+        return false;
+    }
+    ++pos;
+    if (!ParseUnsignedDecimal(value, pos, end, number)) {
+        return false;
+    }
+    ans.last = number;
+    if (pos == end || value[pos] != '/') {
+        return false;
+    }
+    ++pos;
+    if (pos < end && value[pos] == '*') {
+        ++pos;
+    } else {
+        if (!ParseUnsignedDecimal(value, pos, end, number)) {
+            return false;
+        }
+        ans.total = number;
+        ans.total_known = true;
+    }
+    if (pos != end || ans.first > ans.last || (ans.total_known && ans.last >= ans.total)) {
+        return false;
+    }
+    out = ans;
+    return true;
 }
 
 enum class Method { GET, HEAD };
@@ -319,7 +447,8 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     CURLsetopt(*conn, CURLOPT_WRITEFUNCTION, writefunction);
 
     response_headers.clear();
-    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &response_headers);
+    HeaderSink header_sink(response_headers);
+    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &header_sink);
     CURLsetopt(*conn, CURLOPT_HEADERFUNCTION, headerfunction);
 
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);
