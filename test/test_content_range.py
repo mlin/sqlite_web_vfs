@@ -13,6 +13,9 @@
 #   /interimok.db extent responses preceded by a 103 interim response
 #                 carrying a *wrong* Content-Range, with the final 206
 #                 carrying the correct one: reads must succeed
+#   /trailer.db   extent responses are chunked, with no Content-Range in
+#                 the header section and a *correct* one in the trailers:
+#                 trailers are not headers, so reads must fail
 import os
 import re
 import socket
@@ -61,7 +64,7 @@ def _serve_range(conn, path, first, last):
     total = len(DB)
     correct_cr = f"bytes {first}-{last}/{total}"
     if path == "/good.db" or (
-        path in ("/interim.db", "/interimok.db") and (first, last) == (0, 99)
+        path in ("/interim.db", "/interimok.db", "/trailer.db") and (first, last) == (0, 99)
     ):
         # the database-header probe (bytes 0-99) is always served cleanly,
         # so failures below are attributable to extent fetches
@@ -83,6 +86,18 @@ def _serve_range(conn, path, first, last):
         )
         conn.sendall(interim.encode())
         _respond(conn, "206 Partial Content", [("Content-Range", correct_cr)], body)
+    elif path == "/trailer.db":
+        chunked = (
+            (
+                "HTTP/1.1 206 Partial Content\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                f"{len(body):x}\r\n"
+            ).encode()
+            + body
+            + (f"\r\n0\r\nContent-Range: {correct_cr}\r\n\r\n").encode()
+        )
+        conn.sendall(chunked)
     else:
         _respond(conn, "404 Not Found", [], b"")
 
@@ -174,3 +189,8 @@ def test_interim_headers_do_not_leak(origin):
 
 def test_final_response_headers_win(origin):
     assert _count_rows(origin, "/interimok.db") == ROWS
+
+
+def test_trailer_content_range_rejected(origin):
+    with pytest.raises(sqlite3.Error):
+        _count_rows(origin, "/trailer.db")

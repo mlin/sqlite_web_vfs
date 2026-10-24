@@ -160,42 +160,71 @@ TEST_CASE("ReadContentLengthHeader") {
 
 namespace {
 
-void FeedHeader(HTTP::headers &h, const char *line) {
-    std::string s(line);
-    HTTP::headerfunction(&s[0], 1, s.size(), &h);
-}
+struct HeaderFeed {
+    HTTP::headers h;
+    HTTP::HeaderSink sink;
+    HeaderFeed() : sink(h) {}
+    void Feed(const char *line) {
+        std::string s(line);
+        HTTP::headerfunction(&s[0], 1, s.size(), &sink);
+    }
+    void Reset() {
+        h.clear();
+        sink.complete = false;
+    }
+};
 
 } // namespace
 
 TEST_CASE("headerfunction keeps only the final response's headers") {
-    HTTP::headers h;
+    HeaderFeed f;
     // one ordinary response
-    FeedHeader(h, "HTTP/1.1 206 Partial Content\r\n");
-    FeedHeader(h, "Content-Range: bytes 0-99/77824\r\n");
-    FeedHeader(h, "Content-Length: 100\r\n");
-    FeedHeader(h, "\r\n");
-    REQUIRE(h.size() == 2);
-    REQUIRE(h["content-range"] == "bytes 0-99/77824");
+    f.Feed("HTTP/1.1 206 Partial Content\r\n");
+    f.Feed("Content-Range: bytes 0-99/77824\r\n");
+    f.Feed("Content-Length: 100\r\n");
+    f.Feed("\r\n");
+    REQUIRE(f.h.size() == 2);
+    REQUIRE(f.h["content-range"] == "bytes 0-99/77824");
 
     // an interim response's Content-Range must not leak into a final
     // response that omits the header
-    h.clear();
-    FeedHeader(h, "HTTP/1.1 103 Early Hints\r\n");
-    FeedHeader(h, "Content-Range: bytes 0-99/77824\r\n");
-    FeedHeader(h, "\r\n");
-    FeedHeader(h, "HTTP/1.1 206 Partial Content\r\n");
-    FeedHeader(h, "Content-Length: 100\r\n");
-    FeedHeader(h, "\r\n");
-    REQUIRE(h.count("content-range") == 0);
-    REQUIRE(h["content-length"] == "100");
+    f.Reset();
+    f.Feed("HTTP/1.1 103 Early Hints\r\n");
+    f.Feed("Content-Range: bytes 0-99/77824\r\n");
+    f.Feed("\r\n");
+    f.Feed("HTTP/1.1 206 Partial Content\r\n");
+    f.Feed("Content-Length: 100\r\n");
+    f.Feed("\r\n");
+    REQUIRE(f.h.count("content-range") == 0);
+    REQUIRE(f.h["content-length"] == "100");
 
     // when both responses carry the header, the final response's wins
-    h.clear();
-    FeedHeader(h, "HTTP/1.1 301 Moved Permanently\r\n");
-    FeedHeader(h, "Content-Range: bytes 5-9/10\r\n");
-    FeedHeader(h, "\r\n");
-    FeedHeader(h, "HTTP/1.1 206 Partial Content\r\n");
-    FeedHeader(h, "Content-Range: bytes 0-99/77824\r\n");
-    FeedHeader(h, "\r\n");
-    REQUIRE(h["content-range"] == "bytes 0-99/77824");
+    f.Reset();
+    f.Feed("HTTP/1.1 301 Moved Permanently\r\n");
+    f.Feed("Content-Range: bytes 5-9/10\r\n");
+    f.Feed("\r\n");
+    f.Feed("HTTP/1.1 206 Partial Content\r\n");
+    f.Feed("Content-Range: bytes 0-99/77824\r\n");
+    f.Feed("\r\n");
+    REQUIRE(f.h["content-range"] == "bytes 0-99/77824");
+
+    // a trailer (delivered after the header section's blank line) must
+    // not supply a header the final response omitted
+    f.Reset();
+    f.Feed("HTTP/1.1 206 Partial Content\r\n");
+    f.Feed("Transfer-Encoding: chunked\r\n");
+    f.Feed("\r\n");
+    f.Feed("Content-Range: bytes 0-99/77824\r\n"); // trailer
+    f.Feed("\r\n");
+    REQUIRE(f.h.count("content-range") == 0);
+    REQUIRE(f.h["transfer-encoding"] == "chunked");
+
+    // nor overwrite one it carried
+    f.Reset();
+    f.Feed("HTTP/1.1 206 Partial Content\r\n");
+    f.Feed("Content-Range: bytes 5-9/10\r\n");
+    f.Feed("\r\n");
+    f.Feed("Content-Range: bytes 0-99/77824\r\n"); // trailer
+    f.Feed("\r\n");
+    REQUIRE(f.h["content-range"] == "bytes 5-9/10");
 }

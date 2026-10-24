@@ -234,9 +234,19 @@ std::string &rtrim(std::string &s) {
 
 std::string &trim(std::string &s) { return ltrim(rtrim(s)); }
 
+// State for headerfunction: accumulates one perform's response headers
+// into the caller's map, tracking whether the current response's header
+// section has ended.
+struct HeaderSink {
+    headers &out;
+    bool complete = false;
+    explicit HeaderSink(headers &o) : out(o) {}
+};
+
 size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size *= nmemb;
-    headers &h = *reinterpret_cast<headers *>(userdata);
+    HeaderSink &sink = *reinterpret_cast<HeaderSink *>(userdata);
+    headers &h = sink.out;
 
     // libcurl passes the headers of every response in one perform through
     // this callback: 1xx interims, redirect responses, proxy CONNECT
@@ -246,6 +256,20 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     if (size >= 5 && ptr[0] == 'H' && ptr[1] == 'T' && ptr[2] == 'T' && ptr[3] == 'P' &&
         ptr[4] == '/') {
         h.clear();
+        sink.complete = false;
+        return size;
+    }
+
+    // The blank line ends a header section. Fields delivered after it are
+    // trailers (sent after the body of a chunked response), not headers;
+    // ignore them, so a trailer can neither supply nor overwrite a header
+    // (e.g. Content-Range) that callers validate.
+    if ((size == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (size == 1 && ptr[0] == '\n')) {
+        sink.complete = true;
+        return size;
+    }
+    if (sink.complete) {
+        return size;
     }
 
     size_t sep;
@@ -423,7 +447,8 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     CURLsetopt(*conn, CURLOPT_WRITEFUNCTION, writefunction);
 
     response_headers.clear();
-    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &response_headers);
+    HeaderSink header_sink(response_headers);
+    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &header_sink);
     CURLsetopt(*conn, CURLOPT_HEADERFUNCTION, headerfunction);
 
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);
