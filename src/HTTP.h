@@ -238,6 +238,16 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size *= nmemb;
     headers &h = *reinterpret_cast<headers *>(userdata);
 
+    // libcurl passes the headers of every response in one perform through
+    // this callback: 1xx interims, redirect responses, proxy CONNECT
+    // responses, and the final response. A status line starts a new
+    // response, so drop everything accumulated so far: callers must see
+    // only the final response's headers.
+    if (size >= 5 && ptr[0] == 'H' && ptr[1] == 'T' && ptr[2] == 'T' && ptr[3] == 'P' &&
+        ptr[4] == '/') {
+        h.clear();
+    }
+
     size_t sep;
     for (sep = 0; sep < size; sep++) {
         if (ptr[sep] == ':')
@@ -262,6 +272,28 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size;
 }
 
+// Strict unsigned-decimal reader shared by the HTTP header parsers below:
+// reads one or more ASCII digits at s[pos] (bounded by end), with no sign,
+// no embedded whitespace, and an overflow check. On success, sets out,
+// advances pos past the digits, and returns true; otherwise returns false
+// and leaves out untouched.
+bool ParseUnsignedDecimal(const std::string &s, size_t &pos, size_t end, uint64_t &out) {
+    if (pos >= end || !std::isdigit((unsigned char)s[pos])) {
+        return false;
+    }
+    uint64_t n = 0;
+    while (pos < end && std::isdigit((unsigned char)s[pos])) {
+        unsigned int digit = (unsigned int)(s[pos] - '0');
+        if (n > (UINT64_MAX - digit) / 10) {
+            return false;
+        }
+        n = n * 10 + digit;
+        ++pos;
+    }
+    out = n;
+    return true;
+}
+
 // Read content-length response header
 // return: >= 0 the value
 //         -1 header absent
@@ -273,11 +305,10 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     }
     std::string size = size_it->second;
     size = trim(size);
-    const char *size_str = size.c_str();
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long file_size = strtoull(size_str, &endptr, 10);
-    if (errno || endptr != size_str + size.size() || file_size > LLONG_MAX) {
+    size_t pos = 0;
+    uint64_t file_size = 0;
+    if (!ParseUnsignedDecimal(size, pos, size.size(), file_size) || pos != size.size() ||
+        file_size > (uint64_t)LLONG_MAX) {
         return -2;
     }
     return (long long)file_size;
@@ -320,27 +351,9 @@ bool ParseContentRange(const std::string &value, ContentRange &out) {
     }
     ++pos;
 
-    // unsigned decimal number at pos, with an overflow check
     uint64_t number = 0;
-    auto parse_number = [&]() {
-        if (pos == end || !std::isdigit((unsigned char)value[pos])) {
-            return false;
-        }
-        uint64_t n = 0;
-        while (pos < end && std::isdigit((unsigned char)value[pos])) {
-            unsigned int digit = (unsigned int)(value[pos] - '0');
-            if (n > (UINT64_MAX - digit) / 10) {
-                return false;
-            }
-            n = n * 10 + digit;
-            ++pos;
-        }
-        number = n;
-        return true;
-    };
-
     ContentRange ans;
-    if (!parse_number()) {
+    if (!ParseUnsignedDecimal(value, pos, end, number)) {
         return false;
     }
     ans.first = number;
@@ -348,7 +361,7 @@ bool ParseContentRange(const std::string &value, ContentRange &out) {
         return false;
     }
     ++pos;
-    if (!parse_number()) {
+    if (!ParseUnsignedDecimal(value, pos, end, number)) {
         return false;
     }
     ans.last = number;
@@ -359,7 +372,7 @@ bool ParseContentRange(const std::string &value, ContentRange &out) {
     if (pos < end && value[pos] == '*') {
         ++pos;
     } else {
-        if (!parse_number()) {
+        if (!ParseUnsignedDecimal(value, pos, end, number)) {
             return false;
         }
         ans.total = number;
