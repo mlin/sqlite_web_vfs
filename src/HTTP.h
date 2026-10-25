@@ -299,7 +299,7 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
 long long ReadContentLengthHeader(const headers &response_headers) {
     auto size_it = response_headers.find("content-length");
     if (size_it == response_headers.end()) {
-        return 1;
+        return -1;
     }
     std::string size = size_it->second;
     size = trim(size);
