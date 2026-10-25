@@ -12,100 +12,98 @@ namespace {
 
 struct CRCase {
     const char *input;
+    uint64_t first, last; // the range the caller expects the header to name
     bool ok;
-    uint64_t first, last, total;
     bool total_known;
-    CRCase(const char *i, bool o)
-        : input(i), ok(o), first(0), last(0), total(0), total_known(false) {}
-    CRCase(const char *i, bool o, uint64_t f, uint64_t l, uint64_t t, bool tk)
-        : input(i), ok(o), first(f), last(l), total(t), total_known(tk) {}
+    uint64_t total;
+    CRCase(const char *i, uint64_t f, uint64_t l, bool o)
+        : input(i), first(f), last(l), ok(o), total_known(false), total(0) {}
+    CRCase(const char *i, uint64_t f, uint64_t l, bool o, bool tk, uint64_t t)
+        : input(i), first(f), last(l), ok(o), total_known(tk), total(t) {}
 };
 
 } // namespace
 
-TEST_CASE("ParseContentRange table") {
+TEST_CASE("ParseContentRange exact-match table") {
     const CRCase cases[] = {
-        // valid forms
-        {"bytes 0-99/77824", true, 0, 99, 77824, true},
-        {"bytes 65536-77823/77824", true, 65536, 77823, 77824, true},
-        {"bytes 0-99/*", true, 0, 99, 0, false},
-        {"bytes 0-0/1", true, 0, 0, 1, true},
-        {"BYTES 10-19/100", true, 10, 19, 100, true},
-        {"bYtEs 10-19/100", true, 10, 19, 100, true},
-        {"  bytes 10-19/100  ", true, 10, 19, 100, true},
-        {"\tbytes 10-19/100\t", true, 10, 19, 100, true},
-        {"bytes 007-009/0100", true, 7, 9, 100, true}, // leading zeros are digits
-        {"bytes 0-18446744073709551615/*", true, 0, UINT64_MAX, 0, false},
-        {"bytes 18446744073709551615-18446744073709551615/*", true, UINT64_MAX, UINT64_MAX, 0,
-         false},
-        {"bytes 0-18446744073709551614/18446744073709551615", true, 0, UINT64_MAX - 1, UINT64_MAX,
-         true},
-        // malformed syntax
-        {"bytes 0-99", false},                       // missing /total
-        {"bytes 0-99/", false},                      // empty total
-        {"bytes /100", false},                       // missing range entirely
-        {"bytes -99/100", false},                    // empty first
-        {"bytes 0-/100", false},                     // empty last
-        {"bytes 0-99/100 ", true, 0, 99, 100, true}, // trailing OWS is trimmed
-        {"bytes 0-99/100 x", false},                 // junk suffix
-        {"bytes 0-99/100x", false},                  // suffix junk
-        {"bytes 0-99/100,200-299/600", false},       // multiple ranges (comma form)
-        {"bytes 0-99, 200-299/600", false},
-        {"bytes +0-99/100", false}, // sign
-        {"bytes 0-+99/100", false},
-        {"bytes 0-99/+100", false},
-        {"bytes -0-99/100", false},
-        {"bytes 0 -99/100", false}, // embedded whitespace
-        {"bytes 0- 99/100", false},
-        {"bytes 0-99 /100", false},
-        {"bytes 0-99/ 100", false},
-        {"bytes  0-99/100", false}, // two spaces after unit
-        {"bytes\t0-99/100", false}, // tab is not the grammar's SP
-        {"byte 0-99/100", false},   // wrong unit
-        {"bytesx 0-99/100", false},
-        {"items 0-99/100", false},
-        {"bytes 0.0-99/100", false},
-        {"bytes 0x0-99/100", false},
-        {"", false},
-        {" ", false},
-        {"bytes", false},
-        {"bytes ", false},
-        // numeric overflow
-        {"bytes 18446744073709551616-18446744073709551617/*", false}, // 2^64
-        {"bytes 0-18446744073709551616/*", false},
-        {"bytes 0-99/18446744073709551616", false},
-        {"bytes 99999999999999999999999999-99/100", false},
-        // range/total relationships
-        {"bytes 99-0/100", false},  // first > last
-        {"bytes 0-100/100", false}, // last >= total
-        {"bytes 0-99/99", false},   // last >= total
-        {"bytes 0-99/0", false},    // total zero
-        {"bytes */100", false},     // unsatisfied form: not this parser
-        {"bytes */*", false},
+        // the header names exactly the expected range
+        {"bytes 0-99/77824", 0, 99, true, true, 77824},
+        {"bytes 65536-77823/77824", 65536, 77823, true, true, 77824},
+        {"bytes 0-99/*", 0, 99, true, false, 0},
+        {"bytes 0-0/1", 0, 0, true, true, 1},
+        {"BYTES 10-19/100", 10, 19, true, true, 100},
+        {"bYtEs 10-19/100", 10, 19, true, true, 100},
+        {"  bytes 10-19/100  ", 10, 19, true, true, 100},
+        {"\tbytes 10-19/100\t", 10, 19, true, true, 100},
+        {"bytes 007-009/0100", 7, 9, true, true, 100}, // leading zeros are digits
+        {"bytes 0-99/100 ", 0, 99, true, true, 100},   // trailing OWS is trimmed
+        {"bytes 0-18446744073709551615/*", 0, UINT64_MAX, true, false, 0},
+        {"bytes 18446744073709551615-18446744073709551615/*", UINT64_MAX, UINT64_MAX, true, false,
+         0},
+        {"bytes 0-99/18446744073709551615", 0, 99, true, true, UINT64_MAX},
+        // an internally inconsistent total is the callers' business: the
+        // helper only reports it (the header probe requires total > last;
+        // extent fetches require total == file size)
+        {"bytes 0-100/100", 0, 100, true, true, 100},
+        // the header names a different range than expected
+        {"bytes 4096-8191/77824", 0, 4095, false},
+        {"bytes 0-99/77824", 0, 98, false},
+        {"bytes 0-99/77824", 1, 99, false},
+        {"bytes 99-0/100", 0, 99, false},
+        // total out of uint64 range
+        {"bytes 0-99/18446744073709551616", 0, 99, false},
+        {"bytes 0-99/99999999999999999999999999", 0, 99, false},
+        // malformed syntax (the expectation is arbitrary)
+        {"bytes 0-99", 0, 99, false},                 // missing /total
+        {"bytes 0-99/", 0, 99, false},                // empty total
+        {"bytes /100", 0, 99, false},                 // missing range entirely
+        {"bytes -99/100", 0, 99, false},              // empty first
+        {"bytes 0-/100", 0, 99, false},               // empty last
+        {"bytes 0-99/100 x", 0, 99, false},           // junk suffix
+        {"bytes 0-99/100x", 0, 99, false},            // suffix junk
+        {"bytes 0-99/100,200-299/600", 0, 99, false}, // multiple ranges
+        {"bytes 0-99, 200-299/600", 0, 99, false},
+        {"bytes +0-99/100", 0, 99, false}, // sign
+        {"bytes 0-+99/100", 0, 99, false},
+        {"bytes 0-99/+100", 0, 99, false},
+        {"bytes -0-99/100", 0, 99, false},
+        {"bytes 0 -99/100", 0, 99, false}, // embedded whitespace
+        {"bytes 0- 99/100", 0, 99, false},
+        {"bytes 0-99 /100", 0, 99, false},
+        {"bytes 0-99/ 100", 0, 99, false},
+        {"bytes  0-99/100", 0, 99, false}, // two spaces after unit
+        {"bytes\t0-99/100", 0, 99, false}, // tab is not the grammar's SP
+        {"byte 0-99/100", 0, 99, false},   // wrong unit
+        {"bytesx 0-99/100", 0, 99, false},
+        {"items 0-99/100", 0, 99, false},
+        {"bytes 0.0-99/100", 0, 99, false},
+        {"bytes 0x0-99/100", 0, 99, false},
+        {"", 0, 99, false},
+        {" ", 0, 99, false},
+        {"bytes", 0, 99, false},
+        {"bytes ", 0, 99, false},
+        // range endpoints beyond uint64 match no expectation
+        {"bytes 18446744073709551616-18446744073709551617/*", 0, 99, false},
+        {"bytes 0-18446744073709551616/*", 0, 99, false},
+        {"bytes 99999999999999999999999999-99/100", 0, 99, false},
+        {"bytes */100", 0, 99, false}, // unsatisfied form: not this parser
+        {"bytes */*", 0, 99, false},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         const CRCase &c = cases[i];
         CAPTURE(i, c.input);
-        HTTP::ContentRange out;
-        out.first = 111;
-        out.last = 222;
-        out.total = 333;
-        out.total_known = true;
-        bool ok = HTTP::ParseContentRange(c.input, out);
+        bool total_known = true; // sentinels: must survive a failed parse
+        uint64_t total = 424242;
+        bool ok = HTTP::ParseContentRange(c.input, c.first, c.last, total_known, total);
         REQUIRE(ok == c.ok);
         if (ok) {
-            REQUIRE(out.first == c.first);
-            REQUIRE(out.last == c.last);
-            REQUIRE(out.total_known == c.total_known);
+            REQUIRE(total_known == c.total_known);
             if (c.total_known) {
-                REQUIRE(out.total == c.total);
+                REQUIRE(total == c.total);
             }
         } else {
-            // failed parses leave out untouched
-            REQUIRE(out.first == 111);
-            REQUIRE(out.last == 222);
-            REQUIRE(out.total == 333);
-            REQUIRE(out.total_known);
+            REQUIRE(total_known);
+            REQUIRE(total == 424242);
         }
     }
 }

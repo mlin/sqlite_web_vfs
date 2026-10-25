@@ -215,11 +215,13 @@ class File : public SQLiteVFS::File {
                 // catch it later). Content-Range is mandatory on 206
                 // responses (RFC 7233), so an absent header is also an error.
                 auto cr_it = reshdrs.find("content-range");
-                HTTP::ContentRange cr;
+                bool total_known = false;
+                uint64_t total = 0;
                 if (cr_it == reshdrs.end() || body->size() == 0 ||
-                    !HTTP::ParseContentRange(cr_it->second, cr) || cr.first != extent.Offset() ||
-                    cr.last - cr.first != body->size() - 1 ||
-                    (cr.total_known && cr.total != uint64_t(file_size_))) {
+                    !HTTP::ParseContentRange(cr_it->second, extent.Offset(),
+                                             extent.Offset() + body->size() - 1, total_known,
+                                             total) ||
+                    (total_known && total != uint64_t(file_size_))) {
                     SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
                                                << " mismatched content-range = "
                                                << (cr_it == reshdrs.end() ? std::string("<absent>")
@@ -795,10 +797,11 @@ class VFS : public SQLiteVFS::Wrapper {
         if (size_it != reshdrs.end()) {
             SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
                                   << " content-range: " << size_it->second)
-            HTTP::ContentRange cr;
-            if (HTTP::ParseContentRange(size_it->second, cr) && cr.first == 0 && cr.last == 99 &&
-                cr.total_known) {
-                db_file_size = cr.total;
+            bool total_known = false;
+            uint64_t total = 0;
+            if (HTTP::ParseContentRange(size_it->second, 0, 99, total_known, total) &&
+                total_known && total > 99) {
+                db_file_size = total;
             }
         }
         if (!db_file_size) {

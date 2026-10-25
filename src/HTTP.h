@@ -340,26 +340,21 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     return (long long)file_size;
 }
 
-// A parsed Content-Range response header value, restricted to the satisfied
-// byte-range form; see ParseContentRange(). total is meaningful only when
-// total_known (the header may give "*" for an unknown total).
-struct ContentRange {
-    uint64_t first = 0, last = 0, total = 0;
-    bool total_known = false;
-};
-
-// Parse a Content-Range header value (RFC 7233), accepting only the satisfied
-// byte-range form with strict syntax: after trimming surrounding optional
-// whitespace (SP/HTAB), exactly "bytes SP <first>-<last>/<total>" where the
-// numbers are unsigned decimal (no signs, no embedded whitespace, no suffix
-// junk, no multiple ranges) and <total> may instead be "*". The regex checks
-// the grammar; the captured numbers are then verified as strings (leading
-// zeros stripped): first <= last, last < total when the total is known, and
-// each value within uint64 range -- string comparison handles numbers of
-// any magnitude, so overflow needs no arithmetic. Only then are the values
-// converted. Returns true and sets out on success; leaves out untouched
-// otherwise.
-bool ParseContentRange(const std::string &value, ContentRange &out) {
+// Parse a Content-Range header value (RFC 7233), requiring it to name
+// exactly the byte range [first, last] the caller requested: after
+// optional surrounding whitespace (SP/HTAB), exactly
+// "bytes SP <first>-<last>/<total>" with unsigned decimals, where the
+// captured first/last digit strings -- leading zeros stripped -- equal
+// the expected values. (Both callers know what they asked for, and an
+// origin confirming any other range is an error, so no generic range
+// validation happens here; each caller applies its own policy to the
+// total.) <total> may be "*" (reported as total_known false) or a
+// decimal within uint64 range (total_known true, total set); the bound
+// is checked as a string, so numbers of any magnitude are handled
+// without overflow arithmetic. On failure, returns false and leaves
+// total_known and total untouched.
+bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, bool &total_known,
+                       uint64_t &total) {
     static const std::regex re(R"([ \t]*bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)[ \t]*)",
                                std::regex::ECMAScript | std::regex::icase);
     std::smatch m;
@@ -367,44 +362,32 @@ bool ParseContentRange(const std::string &value, ContentRange &out) {
         return false;
     }
 
-    // strip leading zeros, so the numbers can be compared as strings:
-    // first by length, then lexicographically
     auto normalize = [](std::string s) {
         size_t i = s.find_first_not_of('0');
         return i == std::string::npos ? std::string("0") : s.substr(i);
     };
-    auto cmp_decimal = [](const std::string &a, const std::string &b) {
-        if (a.size() != b.size()) {
-            return a.size() < b.size() ? -1 : 1;
-        }
-        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
-    };
-
-    const std::string first = normalize(m[1].str());
-    const std::string last = normalize(m[2].str());
-    const bool total_known = m[3].str() != "*";
-    const std::string total = total_known ? normalize(m[3].str()) : "";
-
-    if (cmp_decimal(first, last) > 0 || (total_known && cmp_decimal(last, total) >= 0)) {
+    if (normalize(m[1].str()) != std::to_string(first) ||
+        normalize(m[2].str()) != std::to_string(last)) {
         return false;
     }
 
-    // the values are known to be decimal strings in range; convert them
+    if (m[3].str() == "*") {
+        total_known = false;
+        return true;
+    }
+    const std::string total_str = normalize(m[3].str());
     static const std::string UINT64_MAX_DECIMAL = "18446744073709551615";
-    auto conv = [&cmp_decimal](const std::string &s, uint64_t &v) {
-        if (cmp_decimal(s, UINT64_MAX_DECIMAL) > 0) {
-            return false;
-        }
-        size_t p = 0;
-        return ParseUnsignedDecimal(s, p, s.size(), v) && p == s.size();
-    };
-    ContentRange ans;
-    ans.total_known = total_known;
-    if (!conv(first, ans.first) || !conv(last, ans.last) ||
-        (total_known && !conv(total, ans.total))) {
+    if (total_str.size() > UINT64_MAX_DECIMAL.size() ||
+        (total_str.size() == UINT64_MAX_DECIMAL.size() && total_str > UINT64_MAX_DECIMAL)) {
         return false;
     }
-    out = ans;
+    size_t pos = 0;
+    uint64_t t = 0;
+    if (!ParseUnsignedDecimal(total_str, pos, total_str.size(), t) || pos != total_str.size()) {
+        return false;
+    }
+    total_known = true;
+    total = t;
     return true;
 }
 
