@@ -208,12 +208,9 @@ class File : public SQLiteVFS::File {
                 return SQLITE_IOERR_SHORT_READ;
             }
             if (status == 206) {
-                // The origin must confirm it sent the range we asked for: a
-                // misbehaving server or proxy could otherwise return the
-                // wrong bytes with the right length, and we'd install them
-                // as the requested extent (SQLite has no page checksums to
-                // catch it later). Content-Range is mandatory on 206
-                // responses (RFC 7233), so an absent header is also an error.
+                // A 206 must confirm the requested range in Content-Range
+                // (RFC 7233). Length alone cannot detect a same-size
+                // response for the wrong range.
                 auto cr_it = reshdrs.find("content-range");
                 bool total_known = false;
                 uint64_t total = 0;
@@ -223,7 +220,7 @@ class File : public SQLiteVFS::File {
                                              total) ||
                     (total_known && total != uint64_t(file_size_))) {
                     SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
-                                               << " mismatched content-range = "
+                                               << " invalid Content-Range = "
                                                << (cr_it == reshdrs.end() ? std::string("<absent>")
                                                                           : cr_it->second))
                     return SQLITE_IOERR_READ;
@@ -789,10 +786,8 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_CORRUPT;
         }
 
-        // parse content-range: the origin must confirm it sent the requested
-        // header range (bytes 0-99) and disclose the total file size. A
-        // missing or malformed header, or one naming a different range,
-        // leaves db_file_size zero, which the check below rejects.
+        // Require Content-Range to confirm bytes 0-99 and disclose a
+        // total > 99.
         auto size_it = reshdrs.find("content-range");
         if (size_it != reshdrs.end()) {
             SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
@@ -806,7 +801,7 @@ class VFS : public SQLiteVFS::Wrapper {
         }
         if (!db_file_size) {
             last_error_ = "[" + filename + "] " + protocol +
-                          " GET bytes=0-99: empty file or invalid content-range header";
+                          " GET bytes=0-99: missing or invalid Content-Range";
             SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_IOERR_READ;
         }

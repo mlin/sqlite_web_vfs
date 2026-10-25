@@ -1,21 +1,14 @@
-# End-to-end tests for Content-Range validation on 206 extent responses,
-# against a local raw-socket origin that serves a small SQLite database
-# with variously broken range handling:
+# Content-Range tests using a local raw-socket SQLite origin.
+# Except for /badprobe.db, probes are valid; faults affect extents only.
 #
-#   /good.db      correct 206 responses
-#   /wrong.db     correct body, but Content-Range shifted by one extent:
-#                 only the header check can catch this
-#   /nocr.db      206 responses with no Content-Range at all
-#   /interim.db   extent responses preceded by a 103 interim response
-#                 carrying a *correct* Content-Range, with the final 206
-#                 omitting it: the VFS must not act on the interim
-#                 response's headers
-#   /interimok.db extent responses preceded by a 103 interim response
-#                 carrying a *wrong* Content-Range, with the final 206
-#                 carrying the correct one: reads must succeed
-#   /trailer.db   extent responses are chunked, with no Content-Range in
-#                 the header section and a *correct* one in the trailers:
-#                 trailers are not headers, so reads must fail
+# /good.db: correct responses.
+# /wrong.db: correct body, range endpoints shifted by 4096 bytes.
+# /nocr.db: missing Content-Range.
+# /wrongtotal.db: correct endpoints, total increased by 4096.
+# /badprobe.db: shifted probe endpoints; correct extent responses.
+# /interim.db: correct Content-Range in 103; none in final 206.
+# /interimok.db: wrong Content-Range in 103; correct one in final 206.
+# /trailer.db: correct Content-Range only in chunked trailers.
 import os
 import re
 import socket
@@ -63,17 +56,20 @@ def _serve_range(conn, path, first, last):
     body = DB[first : last + 1]
     total = len(DB)
     correct_cr = f"bytes {first}-{last}/{total}"
-    if path == "/good.db" or (
-        path in ("/interim.db", "/interimok.db", "/trailer.db") and (first, last) == (0, 99)
-    ):
-        # the database-header probe (bytes 0-99) is always served cleanly,
-        # so failures below are attributable to extent fetches
+    probe = (first, last) == (0, 99)
+    if path == "/badprobe.db" and probe:
+        shifted = f"bytes {first + 4096}-{last + 4096}/{total}"
+        _respond(conn, "206 Partial Content", [("Content-Range", shifted)], body)
+    elif probe or path in ("/good.db", "/badprobe.db"):
         _respond(conn, "206 Partial Content", [("Content-Range", correct_cr)], body)
     elif path == "/wrong.db":
         shifted = f"bytes {first + 4096}-{last + 4096}/{total}"
         _respond(conn, "206 Partial Content", [("Content-Range", shifted)], body)
     elif path == "/nocr.db":
         _respond(conn, "206 Partial Content", [], body)
+    elif path == "/wrongtotal.db":
+        wrong_total = f"bytes {first}-{last}/{total + 4096}"
+        _respond(conn, "206 Partial Content", [("Content-Range", wrong_total)], body)
     elif path == "/interim.db":
         interim = f"HTTP/1.1 103 Early Hints\r\nContent-Range: {correct_cr}\r\n\r\n"
         conn.sendall(interim.encode())
@@ -180,6 +176,16 @@ def test_wrong_content_range_rejected(origin):
 def test_missing_content_range_rejected(origin):
     with pytest.raises(sqlite3.Error):
         _count_rows(origin, "/nocr.db")
+
+
+def test_wrong_total_rejected(origin):
+    with pytest.raises(sqlite3.Error):
+        _count_rows(origin, "/wrongtotal.db")
+
+
+def test_bad_probe_rejected(origin):
+    with pytest.raises(sqlite3.Error):
+        _count_rows(origin, "/badprobe.db")
 
 
 def test_interim_headers_do_not_leak(origin):

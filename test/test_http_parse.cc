@@ -1,8 +1,5 @@
-// Unit tests for the HTTP header machinery in src/HTTP.h: the strict
-// Content-Range parser, the shared unsigned-decimal reader, the
-// Content-Length reader, and the libcurl header callback's handling of
-// multi-response performs (only the final response's headers may remain
-// visible to callers).
+// Tests for Content-Range and Content-Length parsing and for retaining
+// only the final response's headers, excluding trailers.
 #define CATCH_CONFIG_MAIN
 #include "catch2/catch.hpp"
 
@@ -36,14 +33,12 @@ TEST_CASE("ParseContentRange exact-match table") {
         {"  bytes 10-19/100  ", 10, 19, true, true, 100},
         {"\tbytes 10-19/100\t", 10, 19, true, true, 100},
         {"bytes 007-009/0100", 7, 9, true, true, 100}, // leading zeros are digits
-        {"bytes 0-99/100 ", 0, 99, true, true, 100},   // trailing OWS is trimmed
+        {"bytes 0-99/100 ", 0, 99, true, true, 100},   // trailing OWS is allowed
         {"bytes 0-18446744073709551615/*", 0, UINT64_MAX, true, false, 0},
         {"bytes 18446744073709551615-18446744073709551615/*", UINT64_MAX, UINT64_MAX, true, false,
          0},
         {"bytes 0-99/18446744073709551615", 0, 99, true, true, UINT64_MAX},
-        // an internally inconsistent total is the callers' business: the
-        // helper only reports it (the header probe requires total > last;
-        // extent fetches require total == file size)
+        // An inconsistent total parses; callers enforce their total policies.
         {"bytes 0-100/100", 0, 100, true, true, 100},
         // the header names a different range than expected
         {"bytes 4096-8191/77824", 0, 4095, false},
@@ -106,6 +101,22 @@ TEST_CASE("ParseContentRange exact-match table") {
             REQUIRE(total == 424242);
         }
     }
+
+    // Reject oversized values without changing outputs; accept leading zeros.
+    bool total_known = true;
+    uint64_t total = 424242;
+    REQUIRE(!HTTP::ParseContentRange("bytes " + std::string(300, '0') + "-99/77824", 0, 99,
+                                     total_known, total));
+    REQUIRE(total_known);
+    REQUIRE(total == 424242);
+    REQUIRE(!HTTP::ParseContentRange(std::string(300, ' ') + "bytes 0-99/77824", 0, 99, total_known,
+                                     total));
+    REQUIRE(total_known);
+    REQUIRE(total == 424242);
+    REQUIRE(HTTP::ParseContentRange("bytes 000000000000000000000-99/077824", 0, 99, total_known,
+                                    total));
+    REQUIRE(total_known);
+    REQUIRE(total == 77824);
 }
 
 TEST_CASE("ReadContentLengthHeader") {
@@ -120,7 +131,7 @@ TEST_CASE("ReadContentLengthHeader") {
     REQUIRE(HTTP::ReadContentLengthHeader(h) == -2);
     h["content-length"] = "18446744073709551616"; // 2^64: overflow
     REQUIRE(HTTP::ReadContentLengthHeader(h) == -2);
-    h["content-length"] = "+42"; // strtoull accepted a sign; the strict reader does not
+    h["content-length"] = "+42"; // Reject signs, which strtoull accepts.
     REQUIRE(HTTP::ReadContentLengthHeader(h) == -2);
     h["content-length"] = "42x";
     REQUIRE(HTTP::ReadContentLengthHeader(h) == -2);

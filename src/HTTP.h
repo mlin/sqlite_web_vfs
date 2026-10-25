@@ -237,9 +237,7 @@ std::string &rtrim(std::string &s) {
 
 std::string &trim(std::string &s) { return ltrim(rtrim(s)); }
 
-// State for headerfunction: accumulates one perform's response headers
-// into the caller's map, tracking whether the current response's header
-// section has ended.
+// Per-request state for retaining only the final response's headers.
 struct HeaderSink {
     headers &out;
     bool complete = false;
@@ -253,21 +251,15 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
 
     const std::string line(ptr, size);
 
-    // libcurl passes the headers of every response in one perform through
-    // this callback: 1xx interims, redirect responses, proxy CONNECT
-    // responses, and the final response. A status line starts a new
-    // response, so drop everything accumulated so far: callers must see
-    // only the final response's headers.
+    // libcurl reports interim, redirect, CONNECT, and final responses here.
+    // Clear at each status line to retain only the final response's headers.
     if (line.compare(0, 5, "HTTP/") == 0) {
         h.clear();
         sink.complete = false;
         return size;
     }
 
-    // The blank line ends a header section. Fields delivered after it are
-    // trailers (sent after the body of a chunked response), not headers;
-    // ignore them, so a trailer can neither supply nor overwrite a header
-    // (e.g. Content-Range) that callers validate.
+    // The blank line ends the header section. Ignore subsequent trailer fields.
     if (line == "\r\n" || line == "\n") {
         sink.complete = true;
         return size;
@@ -311,9 +303,7 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     }
     std::string size = size_it->second;
     size = trim(size);
-    // The value must be a nonempty decimal string (checked as a string,
-    // since strtoull itself would accept signs and other junk); strtoull
-    // then converts it, reporting overflow via ERANGE.
+    // strtoull accepts signs; require decimal digits first.
     if (size.empty() || size.find_first_not_of("0123456789") != std::string::npos) {
         return -2;
     }
@@ -325,20 +315,20 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     return (long long)v;
 }
 
-// Parse a Content-Range header value (RFC 7233), requiring it to name
-// exactly the byte range [first, last] the caller requested: after
-// optional surrounding whitespace (SP/HTAB), exactly
-// "bytes SP <first>-<last>/<total>" with unsigned decimals, where the
-// captured first/last digit strings -- leading zeros stripped -- equal
-// the expected values. (Both callers know what they asked for, and an
-// origin confirming any other range is an error, so no generic range
-// validation happens here; each caller applies its own policy to the
-// total.) <total> may be "*" (reported as total_known false) or a
-// decimal within uint64 range (total_known true, total set; strtoull
-// reports an out-of-range total via ERANGE). On failure, returns false
-// and leaves total_known and total untouched.
+// Match RFC 7233 satisfied-range syntax for exactly [first, last]:
+// case-insensitive "bytes SP first-last/total", with surrounding SP/HTAB.
+// Compare first/last digit strings after stripping leading zeros.
+// Callers validate the total; no range arithmetic is done here.
+// A decimal uint64 total sets total_known=true and total to its value;
+// "*" sets total_known=false and leaves total unchanged.
+// Return false on failure, leaving both outputs unchanged.
 bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, bool &total_known,
                        uint64_t &total) {
+    // Some std::regex implementations recurse per input character.
+    // Reject values over 256 bytes to bound stack use.
+    if (value.size() > 256) {
+        return false;
+    }
     static const std::regex re(R"([ \t]*bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)[ \t]*)",
                                std::regex::ECMAScript | std::regex::icase);
     std::smatch m;
