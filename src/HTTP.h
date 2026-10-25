@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -298,28 +300,6 @@ size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size;
 }
 
-// Strict unsigned-decimal reader shared by the HTTP header parsers below:
-// reads one or more ASCII digits at s[pos] (bounded by end), with no sign,
-// no embedded whitespace, and an overflow check. On success, sets out,
-// advances pos past the digits, and returns true; otherwise returns false
-// and leaves out untouched.
-bool ParseUnsignedDecimal(const std::string &s, size_t &pos, size_t end, uint64_t &out) {
-    if (pos >= end || !std::isdigit((unsigned char)s[pos])) {
-        return false;
-    }
-    uint64_t n = 0;
-    while (pos < end && std::isdigit((unsigned char)s[pos])) {
-        unsigned int digit = (unsigned int)(s[pos] - '0');
-        if (n > (UINT64_MAX - digit) / 10) {
-            return false;
-        }
-        n = n * 10 + digit;
-        ++pos;
-    }
-    out = n;
-    return true;
-}
-
 // Read content-length response header
 // return: >= 0 the value
 //         -1 header absent
@@ -331,13 +311,18 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     }
     std::string size = size_it->second;
     size = trim(size);
-    size_t pos = 0;
-    uint64_t file_size = 0;
-    if (!ParseUnsignedDecimal(size, pos, size.size(), file_size) || pos != size.size() ||
-        file_size > (uint64_t)LLONG_MAX) {
+    // The value must be a nonempty decimal string (checked as a string,
+    // since strtoull itself would accept signs and other junk); strtoull
+    // then converts it, reporting overflow via ERANGE.
+    if (size.empty() || size.find_first_not_of("0123456789") != std::string::npos) {
         return -2;
     }
-    return (long long)file_size;
+    errno = 0;
+    unsigned long long v = strtoull(size.c_str(), nullptr, 10);
+    if (errno == ERANGE || v > (unsigned long long)LLONG_MAX) {
+        return -2;
+    }
+    return (long long)v;
 }
 
 // Parse a Content-Range header value (RFC 7233), requiring it to name
@@ -349,10 +334,9 @@ long long ReadContentLengthHeader(const headers &response_headers) {
 // origin confirming any other range is an error, so no generic range
 // validation happens here; each caller applies its own policy to the
 // total.) <total> may be "*" (reported as total_known false) or a
-// decimal within uint64 range (total_known true, total set); the bound
-// is checked as a string, so numbers of any magnitude are handled
-// without overflow arithmetic. On failure, returns false and leaves
-// total_known and total untouched.
+// decimal within uint64 range (total_known true, total set; strtoull
+// reports an out-of-range total via ERANGE). On failure, returns false
+// and leaves total_known and total untouched.
 bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, bool &total_known,
                        uint64_t &total) {
     static const std::regex re(R"([ \t]*bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)[ \t]*)",
@@ -375,19 +359,13 @@ bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, 
         total_known = false;
         return true;
     }
-    const std::string total_str = normalize(m[3].str());
-    static const std::string UINT64_MAX_DECIMAL = "18446744073709551615";
-    if (total_str.size() > UINT64_MAX_DECIMAL.size() ||
-        (total_str.size() == UINT64_MAX_DECIMAL.size() && total_str > UINT64_MAX_DECIMAL)) {
+    errno = 0;
+    uint64_t t = strtoull(m[3].str().c_str(), nullptr, 10);
+    if (errno == ERANGE) {
         return false;
     }
-    size_t pos = 0;
-    uint64_t t = 0;
-    if (!ParseUnsignedDecimal(total_str, pos, total_str.size(), t) || pos != total_str.size()) {
-        return false;
-    }
-    total_known = true;
     total = t;
+    total_known = true;
     return true;
 }
 

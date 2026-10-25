@@ -108,34 +108,6 @@ TEST_CASE("ParseContentRange exact-match table") {
     }
 }
 
-TEST_CASE("ParseUnsignedDecimal") {
-    const std::string s = "123x 18446744073709551615 18446744073709551616 +7";
-    size_t pos = 0;
-    uint64_t out = 999;
-    REQUIRE(HTTP::ParseUnsignedDecimal(s, pos, s.size(), out));
-    REQUIRE(out == 123);
-    REQUIRE(pos == 3); // stops at the first non-digit
-    // no digits at pos: fails and leaves out untouched
-    out = 999;
-    REQUIRE(!HTTP::ParseUnsignedDecimal(s, pos, s.size(), out));
-    REQUIRE(out == 999);
-    // UINT64_MAX parses exactly
-    pos = 5;
-    REQUIRE(HTTP::ParseUnsignedDecimal(s, pos, s.size(), out));
-    REQUIRE(out == UINT64_MAX);
-    // 2^64 overflows
-    pos = 26;
-    out = 999;
-    REQUIRE(!HTTP::ParseUnsignedDecimal(s, pos, s.size(), out));
-    REQUIRE(out == 999);
-    // a sign is not a digit
-    pos = 46;
-    REQUIRE(!HTTP::ParseUnsignedDecimal(s, pos, s.size(), out));
-    // empty range
-    pos = 0;
-    REQUIRE(!HTTP::ParseUnsignedDecimal(s, pos, 0, out));
-}
-
 TEST_CASE("ReadContentLengthHeader") {
     HTTP::headers h;
     h["content-length"] = "77824";
