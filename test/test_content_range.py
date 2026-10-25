@@ -6,6 +6,7 @@
 # /nocr.db: missing Content-Range.
 # /wrongtotal.db: correct endpoints, total increased by 4096.
 # /badprobe.db: shifted probe endpoints; correct extent responses.
+# /badtotal.db: correct probe endpoints, wrong total; correct extents.
 # /interim.db: correct Content-Range in 103; none in final 206.
 # /interimok.db: wrong Content-Range in 103; correct one in final 206.
 # /trailer.db: correct Content-Range only in chunked trailers.
@@ -57,7 +58,10 @@ def _serve_range(conn, path, first, last):
     total = len(DB)
     correct_cr = f"bytes {first}-{last}/{total}"
     probe = (first, last) == (0, 99)
-    if path == "/badprobe.db" and probe:
+    if path == "/badtotal.db" and probe:
+        wrong_total = f"bytes {first}-{last}/{total + 4096}"
+        _respond(conn, "206 Partial Content", [("Content-Range", wrong_total)], body)
+    elif path == "/badprobe.db" and probe:
         shifted = f"bytes {first + 4096}-{last + 4096}/{total}"
         _respond(conn, "206 Partial Content", [("Content-Range", shifted)], body)
     elif probe or path in ("/good.db", "/badprobe.db"):
@@ -186,6 +190,11 @@ def test_wrong_total_rejected(origin):
 def test_bad_probe_rejected(origin):
     with pytest.raises(sqlite3.Error):
         _count_rows(origin, "/badprobe.db")
+
+
+def test_bad_probe_total_rejected(origin):
+    with pytest.raises(sqlite3.Error):
+        _count_rows(origin, "/badtotal.db")
 
 
 def test_interim_headers_do_not_leak(origin):

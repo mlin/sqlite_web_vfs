@@ -212,13 +212,11 @@ class File : public SQLiteVFS::File {
                 // (RFC 7233). Length alone cannot detect a same-size
                 // response for the wrong range.
                 auto cr_it = reshdrs.find("content-range");
-                bool total_known = false;
-                uint64_t total = 0;
                 if (cr_it == reshdrs.end() || body->size() == 0 ||
-                    !HTTP::ParseContentRange(cr_it->second, extent.Offset(),
-                                             extent.Offset() + body->size() - 1, total_known,
-                                             total) ||
-                    (total_known && total != uint64_t(file_size_))) {
+                    !HTTP::MatchesContentRange(cr_it->second, extent.Offset(),
+                                               extent.Offset() + body->size() - 1,
+                                               uint64_t(file_size_),
+                                               /*allow_unknown_total=*/true)) {
                     SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
                                                << " invalid Content-Range = "
                                                << (cr_it == reshdrs.end() ? std::string("<absent>")
@@ -786,27 +784,8 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_CORRUPT;
         }
 
-        // Require Content-Range to confirm bytes 0-99 and disclose a
-        // total > 99.
-        auto size_it = reshdrs.find("content-range");
-        if (size_it != reshdrs.end()) {
-            SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
-                                  << " content-range: " << size_it->second)
-            bool total_known = false;
-            uint64_t total = 0;
-            if (HTTP::ParseContentRange(size_it->second, 0, 99, total_known, total) &&
-                total_known && total > 99) {
-                db_file_size = total;
-            }
-        }
-        if (!db_file_size) {
-            last_error_ = "[" + filename + "] " + protocol +
-                          " GET bytes=0-99: missing or invalid Content-Range";
-            SQLITE_VFS_LOG(1, last_error_)
-            return SQLITE_IOERR_READ;
-        }
-
-        // read the page size & page count from the header; their product should equal file size.
+        // Read the page size & page count from the header; their product is
+        // the expected file size, which Content-Range must confirm below.
         // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
         page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
         if (page_size == 1) {
@@ -817,16 +796,30 @@ class VFS : public SQLiteVFS::Wrapper {
             page_count <<= 8;
             page_count += uint8_t(db_header[ofs]);
         }
+        if (page_size < 512 || page_size > 65536 || page_count == 0) {
+            last_error_ =
+                "[" + filename + "] database corrupt or truncated; invalid in-header database size";
+            SQLITE_VFS_LOG(1, last_error_)
+            return SQLITE_CORRUPT;
+        }
+        db_file_size = page_size * page_count;
         SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
                               << " bytes = " << page_size << " bytes/page * " << page_count
                               << " pages (" << (t.micros() / 1000) << "ms)")
-        if (page_size < 512 || page_size > 65536 || page_count == 0 ||
-            db_file_size != page_size * page_count) {
-            last_error_ = "[" + filename +
-                          "] database corrupt or truncated; content-range file size doesn't "
-                          "match in-header database size";
+
+        // Require Content-Range to confirm bytes 0-99 and the expected total.
+        auto size_it = reshdrs.find("content-range");
+        if (size_it != reshdrs.end()) {
+            SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
+                                  << " content-range: " << size_it->second)
+        }
+        if (size_it == reshdrs.end() ||
+            !HTTP::MatchesContentRange(size_it->second, 0, 99, db_file_size,
+                                       /*allow_unknown_total=*/false)) {
+            last_error_ = "[" + filename + "] " + protocol +
+                          " GET bytes=0-99: missing or invalid Content-Range";
             SQLITE_VFS_LOG(1, last_error_)
-            return SQLITE_CORRUPT;
+            return SQLITE_IOERR_READ;
         }
         return SQLITE_OK;
     }

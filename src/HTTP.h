@@ -315,15 +315,13 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     return (long long)v;
 }
 
-// Match RFC 7233 satisfied-range syntax for exactly [first, last]:
-// case-insensitive "bytes SP first-last/total", with surrounding SP/HTAB.
-// Compare first/last digit strings after stripping leading zeros.
-// Callers validate the total; no range arithmetic is done here.
-// A decimal uint64 total sets total_known=true and total to its value;
-// "*" sets total_known=false and leaves total unchanged.
-// Return false on failure, leaving both outputs unchanged.
-bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, bool &total_known,
-                       uint64_t &total) {
+// Match a Content-Range header value against the expected range and
+// total: RFC 7233 satisfied-range syntax, case-insensitive "bytes SP
+// first-last/total" with surrounding SP/HTAB. Each numeric field,
+// leading zeros stripped, must textually equal the expected value's
+// decimal form. The total may instead be "*" iff allow_unknown_total.
+bool MatchesContentRange(const std::string &value, uint64_t first, uint64_t last,
+                         uint64_t expected_total, bool allow_unknown_total) {
     // Some std::regex implementations recurse per input character.
     // Reject values over 256 bytes to bound stack use.
     if (value.size() > 256) {
@@ -344,19 +342,8 @@ bool ParseContentRange(const std::string &value, uint64_t first, uint64_t last, 
         normalize(m[2].str()) != std::to_string(last)) {
         return false;
     }
-
-    if (m[3].str() == "*") {
-        total_known = false;
-        return true;
-    }
-    errno = 0;
-    uint64_t t = strtoull(m[3].str().c_str(), nullptr, 10);
-    if (errno == ERANGE) {
-        return false;
-    }
-    total = t;
-    total_known = true;
-    return true;
+    return m[3].str() == "*" ? allow_unknown_total
+                             : normalize(m[3].str()) == std::to_string(expected_total);
 }
 
 enum class Method { GET, HEAD };
