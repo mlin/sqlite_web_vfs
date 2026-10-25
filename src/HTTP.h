@@ -3,6 +3,10 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <curl/curl.h>
 #include <functional>
 #include <iostream>
@@ -12,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -232,9 +237,36 @@ std::string &rtrim(std::string &s) {
 
 std::string &trim(std::string &s) { return ltrim(rtrim(s)); }
 
+// Per-request state for retaining only the final response's headers.
+struct HeaderSink {
+    headers &out;
+    bool complete = false;
+    explicit HeaderSink(headers &o) : out(o) {}
+};
+
 size_t headerfunction(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size *= nmemb;
-    headers &h = *reinterpret_cast<headers *>(userdata);
+    HeaderSink &sink = *reinterpret_cast<HeaderSink *>(userdata);
+    headers &h = sink.out;
+
+    const std::string line(ptr, size);
+
+    // libcurl reports interim, redirect, CONNECT, and final responses here.
+    // Clear at each status line to retain only the final response's headers.
+    if (line.compare(0, 5, "HTTP/") == 0) {
+        h.clear();
+        sink.complete = false;
+        return size;
+    }
+
+    // The blank line ends the header section. Ignore subsequent trailer fields.
+    if (line == "\r\n" || line == "\n") {
+        sink.complete = true;
+        return size;
+    }
+    if (sink.complete) {
+        return size;
+    }
 
     size_t sep;
     for (sep = 0; sep < size; sep++) {
@@ -271,14 +303,47 @@ long long ReadContentLengthHeader(const headers &response_headers) {
     }
     std::string size = size_it->second;
     size = trim(size);
-    const char *size_str = size.c_str();
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long file_size = strtoull(size_str, &endptr, 10);
-    if (errno || endptr != size_str + size.size() || file_size > LLONG_MAX) {
+    // strtoull accepts signs; require decimal digits first.
+    if (size.empty() || size.find_first_not_of("0123456789") != std::string::npos) {
         return -2;
     }
-    return (long long)file_size;
+    errno = 0;
+    unsigned long long v = strtoull(size.c_str(), nullptr, 10);
+    if (errno == ERANGE || v > (unsigned long long)LLONG_MAX) {
+        return -2;
+    }
+    return (long long)v;
+}
+
+// Match a Content-Range header value against the expected range and
+// total: RFC 7233 satisfied-range syntax, case-insensitive "bytes SP
+// first-last/total" with surrounding SP/HTAB. Each numeric field,
+// leading zeros stripped, must textually equal the expected value's
+// decimal form. The total may instead be "*" iff allow_unknown_total.
+bool MatchesContentRange(const std::string &value, uint64_t first, uint64_t last,
+                         uint64_t expected_total, bool allow_unknown_total) {
+    // Some std::regex implementations recurse per input character.
+    // Reject values over 256 bytes to bound stack use.
+    if (value.size() > 256) {
+        return false;
+    }
+    static const std::regex re(R"([ \t]*bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)[ \t]*)",
+                               std::regex::ECMAScript | std::regex::icase);
+    std::smatch m;
+    if (!std::regex_match(value, m, re)) {
+        return false;
+    }
+
+    auto normalize = [](std::string s) {
+        size_t i = s.find_first_not_of('0');
+        return i == std::string::npos ? std::string("0") : s.substr(i);
+    };
+    if (normalize(m[1].str()) != std::to_string(first) ||
+        normalize(m[2].str()) != std::to_string(last)) {
+        return false;
+    }
+    return m[3].str() == "*" ? allow_unknown_total
+                             : normalize(m[3].str()) == std::to_string(expected_total);
 }
 
 enum class Method { GET, HEAD };
@@ -319,7 +384,8 @@ CURLcode Request(Method method, const std::string &url, const headers &request_h
     CURLsetopt(*conn, CURLOPT_WRITEFUNCTION, writefunction);
 
     response_headers.clear();
-    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &response_headers);
+    HeaderSink header_sink(response_headers);
+    CURLsetopt(*conn, CURLOPT_WRITEHEADER, &header_sink);
     CURLsetopt(*conn, CURLOPT_HEADERFUNCTION, headerfunction);
 
     CURLsetopt(*conn, CURLOPT_FOLLOWLOCATION, 1);

@@ -208,6 +208,23 @@ class File : public SQLiteVFS::File {
                                            << ", expected = " << extent.Bytes())
                 return SQLITE_IOERR_SHORT_READ;
             }
+            if (status == 206) {
+                // A 206 must confirm the requested range in Content-Range
+                // (RFC 7233). Length alone cannot detect a same-size
+                // response for the wrong range.
+                auto cr_it = reshdrs.find("content-range");
+                if (cr_it == reshdrs.end() || body->size() == 0 ||
+                    !HTTP::MatchesContentRange(cr_it->second, extent.Offset(),
+                                               extent.Offset() + body->size() - 1,
+                                               uint64_t(file_size_),
+                                               /*allow_unknown_total=*/true)) {
+                    SQLITE_WEB_LOG(1, protocol << " GET " << reqhdrs["range"]
+                                               << " invalid Content-Range = "
+                                               << (cr_it == reshdrs.end() ? std::string("<absent>")
+                                                                          : cr_it->second))
+                    return SQLITE_IOERR_READ;
+                }
+            }
             data = body;
             if (log_.level() >= 4) {
                 SQLITE_WEB_LOG(4, protocol << " GET " << reqhdrs["range"] << " OK ("
@@ -806,35 +823,8 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_CORRUPT;
         }
 
-        // parse content-range
-        auto size_it = reshdrs.find("content-range");
-        if (size_it != reshdrs.end()) {
-            SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
-                                  << " content-range: " << size_it->second)
-            const std::string &cr = size_it->second;
-            if (cr.substr(0, 6) == "bytes ") {
-                auto slash = cr.find('/');
-                if (slash != std::string::npos) {
-                    std::string size_txt = cr.substr(slash + 1);
-                    const char *size_str = size_txt.c_str();
-                    char *endptr = nullptr;
-                    errno = 0;
-                    db_file_size = strtoull(size_str, &endptr, 10);
-                    if (errno || endptr != size_str + size_txt.size()) {
-                        db_file_size = 0;
-                    }
-                }
-            }
-        }
-        if (!db_file_size) {
-            std::string err = "[" + filename + "] " + protocol +
-                              " GET bytes=0-99: empty file or invalid content-range header";
-            SetLastError(err);
-            SQLITE_VFS_LOG(1, err)
-            return SQLITE_IOERR_READ;
-        }
-
-        // read the page size & page count from the header; their product should equal file size.
+        // Read the page size & page count from the header; their product is
+        // the expected file size, which Content-Range must confirm below.
         // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
         page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
         if (page_size == 1) {
@@ -845,17 +835,32 @@ class VFS : public SQLiteVFS::Wrapper {
             page_count <<= 8;
             page_count += uint8_t(db_header[ofs]);
         }
-        SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
-                              << " bytes = " << page_size << " bytes/page * " << page_count
-                              << " pages (" << (t.micros() / 1000) << "ms)")
-        if (page_size < 512 || page_size > 65536 || page_count == 0 ||
-            db_file_size != page_size * page_count) {
-            std::string err = "[" + filename +
-                              "] database corrupt or truncated; content-range file size doesn't "
-                              "match in-header database size";
+        if (page_size < 512 || page_size > 65536 || page_count == 0) {
+            std::string err =
+                "[" + filename + "] database corrupt or truncated; invalid in-header database size";
             SetLastError(err);
             SQLITE_VFS_LOG(1, err)
             return SQLITE_CORRUPT;
+        }
+        db_file_size = page_size * page_count;
+        SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
+                              << " bytes = " << page_size << " bytes/page * " << page_count
+                              << " pages (" << (t.micros() / 1000) << "ms)")
+
+        // Require Content-Range to confirm bytes 0-99 and the expected total.
+        auto size_it = reshdrs.find("content-range");
+        if (size_it != reshdrs.end()) {
+            SQLITE_VFS_LOG(5, "[" << filename << "] " << protocol
+                                  << " content-range: " << size_it->second)
+        }
+        if (size_it == reshdrs.end() ||
+            !HTTP::MatchesContentRange(size_it->second, 0, 99, db_file_size,
+                                       /*allow_unknown_total=*/false)) {
+            std::string err = "[" + filename + "] " + protocol +
+                              " GET bytes=0-99: missing or invalid Content-Range";
+            SetLastError(err);
+            SQLITE_VFS_LOG(1, err)
+            return SQLITE_IOERR_READ;
         }
         return SQLITE_OK;
     }
