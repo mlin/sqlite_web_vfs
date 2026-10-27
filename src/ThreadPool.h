@@ -197,8 +197,11 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
     void Barrier() override {
         while (fast_queue_size_.load(std::memory_order_relaxed)) {
             assert(worker_thread_);
+            // spin on the CPU's pause hint; std::this_thread::yield() is an OS syscall
 #ifdef __x86_64__
             __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ __volatile__("yield");
 #else
             std::this_thread::yield();
 #endif
