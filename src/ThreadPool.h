@@ -10,9 +10,13 @@
 
 #include <climits>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <mutex>
 #include <queue>
+// Disable optional cache-line over-alignment so ordinary C++11 new suffices.
+// TODO: Benchmark whether restoring it materially improves prefetch throughput.
+#define MOODYCAMEL_MAYBE_ALIGN_TO_CACHELINE
 #include <readerwriterqueue.h>
 #include <thread>
 
@@ -209,3 +213,6 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
         ThreadPool::Barrier();
     }
 };
+
+static_assert(alignof(ThreadPoolWithEnqueueFast) <= alignof(std::max_align_t),
+              "Thread pool must support ordinary allocation");
