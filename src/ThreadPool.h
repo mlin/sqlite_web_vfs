@@ -10,14 +10,12 @@
 
 #include <climits>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <mutex>
 #include <queue>
-// Opt the readerwriterqueue out of its cache-line over-alignment: it is a false-sharing
-// optimization, not a correctness requirement, and C++11 plain new cannot honor it, so
-// objects embedding the queue would otherwise be under-aligned (undefined behavior).
-// Defining the header's own opt-out macro empty makes ordinary allocation correct; the
-// possible false-sharing cost is to be measured before restoring the alignment.
+// Disable optional cache-line over-alignment so ordinary C++11 new suffices.
+// TODO: Benchmark whether restoring it materially improves prefetch throughput.
 #define MOODYCAMEL_MAYBE_ALIGN_TO_CACHELINE
 #include <readerwriterqueue.h>
 #include <thread>
@@ -212,3 +210,6 @@ class ThreadPoolWithEnqueueFast : public ThreadPool {
         ThreadPool::Barrier();
     }
 };
+
+static_assert(alignof(ThreadPoolWithEnqueueFast) <= alignof(std::max_align_t),
+              "Thread pool must support ordinary allocation");
