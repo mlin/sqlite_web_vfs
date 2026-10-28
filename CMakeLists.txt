@@ -18,7 +18,7 @@ endif()
 FetchContent_Declare(
     concurrentqueue
     GIT_REPOSITORY  https://github.com/cameron314/readerwriterqueue.git
-    GIT_TAG         v1.0.7
+    GIT_TAG         8b2176698e9bdaba653cdc20c32b54737a934b47 # v1.0.7
 )
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
