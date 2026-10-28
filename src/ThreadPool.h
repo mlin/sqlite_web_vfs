@@ -13,6 +13,12 @@
 #include <functional>
 #include <mutex>
 #include <queue>
+// Opt the readerwriterqueue out of its cache-line over-alignment: it is a false-sharing
+// optimization, not a correctness requirement, and C++11 plain new cannot honor it, so
+// objects embedding the queue would otherwise be under-aligned (undefined behavior).
+// Defining the header's own opt-out macro empty makes ordinary allocation correct; the
+// possible false-sharing cost is to be measured before restoring the alignment.
+#define MOODYCAMEL_MAYBE_ALIGN_TO_CACHELINE
 #include <readerwriterqueue.h>
 #include <thread>
 
