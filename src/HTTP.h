@@ -67,18 +67,15 @@ static lazycurl_api __lazycurl;
 namespace HTTP {
 
 #ifndef HTTP_LAZYCURL
-CURLcode global_init() { return curl_global_init(CURL_GLOBAL_ALL); }
+static CURLcode global_init_impl() { return curl_global_init(CURL_GLOBAL_ALL); }
 #else
-CURLcode global_init() {
+static CURLcode global_init_impl() {
 #if defined(__APPLE__)
     static const char *libname[] = {"libcurl.4.dylib", "libcurl.dylib"};
 #else
     static const char *libname[] = {"libcurl.so.4", "libcurl.so"};
 #endif
-    static void *hlib = nullptr;
-    if (hlib) {
-        return CURLE_OK;
-    }
+    void *hlib = nullptr;
     for (int i = 0; !hlib && i < sizeof(libname) / sizeof(const char *); ++i) {
         hlib = dlopen(libname[i], RTLD_NOW | RTLD_GLOBAL);
     }
@@ -107,6 +104,13 @@ CURLcode global_init() {
     return CURLE_NOT_BUILT_IN;
 }
 #endif
+
+// libcurl's global initialization is not safe to call concurrently, so run
+// it once per process and cache the result, including failures.
+CURLcode global_init() {
+    static const CURLcode rc = global_init_impl();
+    return rc;
+}
 
 // Helper class to scope a CURL handle
 class CURLconn {
